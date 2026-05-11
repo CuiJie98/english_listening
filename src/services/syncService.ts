@@ -1,6 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import { fetchFeed } from './feedService';
 import { fetchTranscript } from './transcriptService';
+import { downloadEpisodeAudio } from './audioCache';
 import {
   getEpisodeByBbcId,
   insertEpisode,
@@ -13,18 +14,21 @@ export interface SyncProgress {
   processed: number;
   newEpisodes: number;
   transcriptsFetched: number;
-  status: 'idle' | 'fetching_feed' | 'syncing' | 'done' | 'error';
+  audioDownloaded: number;
+  status: 'idle' | 'fetching_feed' | 'syncing' | 'downloading' | 'done' | 'error';
 }
 
 export async function syncEpisodes(
   db: SQLiteDatabase,
-  onProgress?: (progress: SyncProgress) => void
+  onProgress?: (progress: SyncProgress) => void,
+  downloadAudio = false
 ): Promise<SyncProgress> {
   const progress: SyncProgress = {
     total: 0,
     processed: 0,
     newEpisodes: 0,
     transcriptsFetched: 0,
+    audioDownloaded: 0,
     status: 'idle',
   };
 
@@ -36,6 +40,8 @@ export async function syncEpisodes(
     progress.total = feedItems.length;
     progress.status = 'syncing';
     onProgress?.(progress);
+
+    const newBbcIds: string[] = [];
 
     for (const item of feedItems) {
       const existing = await getEpisodeByBbcId(db, item.bbc_id);
@@ -54,6 +60,7 @@ export async function syncEpisodes(
           transcript_segments: null,
           fetch_status: 'pending',
         });
+        newBbcIds.push(item.bbc_id);
         progress.newEpisodes++;
       }
 
@@ -81,6 +88,25 @@ export async function syncEpisodes(
         progress.transcriptsFetched++;
       } else {
         await updateEpisodeTranscript(db, row.bbc_id, '', 'failed');
+      }
+    }
+
+    // Download audio for new episodes if requested
+    if (downloadAudio && newBbcIds.length > 0) {
+      progress.status = 'downloading';
+      onProgress?.(progress);
+
+      const feedMap = new Map(feedItems.map((f) => [f.bbc_id, f.audio_url]));
+
+      for (const bbcId of newBbcIds) {
+        const audioUrl = feedMap.get(bbcId);
+        if (!audioUrl) continue;
+
+        const localUri = await downloadEpisodeAudio(db, bbcId, audioUrl);
+        if (localUri) {
+          progress.audioDownloaded++;
+        }
+        onProgress?.(progress);
       }
     }
 

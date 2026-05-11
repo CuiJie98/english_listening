@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Switch } from 'react-native';
 import { useSQLiteContext } from 'expo-sqlite';
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'expo-router';
@@ -12,9 +12,11 @@ export default function HomeScreen() {
   const router = useRouter();
   const [dueCount, setDueCount] = useState(0);
   const [streak, setStreak] = useState(0);
+  const [totalEpisodes, setTotalEpisodes] = useState(0);
   const [latestEpisode, setLatestEpisode] = useState<EpisodeSummary | null>(null);
   const [syncState, setSyncState] = useState<SyncProgress | null>(null);
   const [loading, setLoading] = useState(true);
+  const [downloadAudio, setDownloadAudio] = useState(false);
 
   const loadData = useCallback(async () => {
     const [due, streakDays, episodes] = await Promise.all([
@@ -24,6 +26,7 @@ export default function HomeScreen() {
     ]);
     setDueCount(due);
     setStreak(streakDays);
+    setTotalEpisodes(episodes.length);
     setLatestEpisode(episodes.length > 0 ? episodes[0] : null);
     setLoading(false);
   }, [db]);
@@ -33,14 +36,18 @@ export default function HomeScreen() {
   }, [loadData]);
 
   const handleSync = async () => {
-    if (syncState?.status === 'fetching_feed' || syncState?.status === 'syncing') return;
+    if (syncState?.status === 'fetching_feed' || syncState?.status === 'syncing' || syncState?.status === 'downloading') return;
     try {
-      await syncEpisodes(db, (p) => setSyncState({ ...p }));
+      await syncEpisodes(db, (p) => setSyncState({ ...p }), downloadAudio);
       await loadData();
     } catch {
       // error handled by syncState.status
     }
   };
+
+  const isSyncing = syncState?.status === 'fetching_feed'
+    || syncState?.status === 'syncing'
+    || syncState?.status === 'downloading';
 
   if (loading) {
     return (
@@ -52,13 +59,22 @@ export default function HomeScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>6 Min English</Text>
+      <View style={styles.header}>
+        <Text style={styles.title}>6 Min English</Text>
+        <TouchableOpacity onPress={() => router.push('/settings')}>
+          <Text style={styles.settingsIcon}>⚙️</Text>
+        </TouchableOpacity>
+      </View>
       <Text style={styles.subtitle}>BBC Learning English</Text>
 
       <View style={styles.statsRow}>
         <View style={styles.statCard}>
           <Text style={styles.statNumber}>{streak}</Text>
           <Text style={styles.statLabel}>Day Streak</Text>
+        </View>
+        <View style={styles.statCard}>
+          <Text style={styles.statNumber}>{totalEpisodes}</Text>
+          <Text style={styles.statLabel}>Episodes</Text>
         </View>
         <View style={styles.statCard}>
           <Text style={styles.statNumber}>{dueCount}</Text>
@@ -79,23 +95,45 @@ export default function HomeScreen() {
         </TouchableOpacity>
       )}
 
-      <TouchableOpacity style={styles.syncButton} onPress={handleSync}>
-        {syncState?.status === 'fetching_feed' || syncState?.status === 'syncing' ? (
-          <ActivityIndicator color={colors.surface} size="small" />
-        ) : (
-          <Text style={styles.syncButtonText}>Sync New Episodes</Text>
-        )}
-      </TouchableOpacity>
+      <View style={styles.syncSection}>
+        <View style={styles.syncOption}>
+          <Text style={styles.syncOptionLabel}>Download audio for offline</Text>
+          <Switch
+            value={downloadAudio}
+            onValueChange={setDownloadAudio}
+            trackColor={{ true: colors.primary }}
+          />
+        </View>
 
-      {syncState && syncState.status !== 'idle' && (
-        <Text style={styles.syncStatus}>
-          {syncState.status === 'done'
-            ? `Done! ${syncState.newEpisodes} new, ${syncState.transcriptsFetched} transcripts`
-            : syncState.status === 'error'
-              ? 'Sync failed. Check your connection.'
-              : `Syncing... ${syncState.processed}/${syncState.total}`}
-        </Text>
-      )}
+        <TouchableOpacity style={styles.syncButton} onPress={handleSync} disabled={!!isSyncing}>
+          {isSyncing ? (
+            <View style={styles.syncingRow}>
+              <ActivityIndicator color={colors.surface} size="small" />
+              <Text style={styles.syncButtonText}>
+                {syncState?.status === 'downloading'
+                  ? `Downloading ${syncState.audioDownloaded}...`
+                  : `Syncing ${syncState?.processed}/${syncState?.total}`}
+              </Text>
+            </View>
+          ) : (
+            <Text style={styles.syncButtonText}>Sync New Episodes</Text>
+          )}
+        </TouchableOpacity>
+
+        {syncState && syncState.status === 'done' && (
+          <Text style={styles.syncStatus}>
+            {syncState.newEpisodes > 0
+              ? `${syncState.newEpisodes} new episodes${syncState.transcriptsFetched > 0 ? `, ${syncState.transcriptsFetched} transcripts` : ''}${syncState.audioDownloaded > 0 ? `, ${syncState.audioDownloaded} downloaded` : ''}`
+              : 'Already up to date'}
+          </Text>
+        )}
+
+        {syncState && syncState.status === 'error' && (
+          <Text style={[styles.syncStatus, { color: colors.error }]}>
+            Sync failed. Check your connection.
+          </Text>
+        )}
+      </View>
 
       {dueCount > 0 && (
         <TouchableOpacity
@@ -121,10 +159,18 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
   title: {
     fontSize: fontSize.xxl,
     fontWeight: '700',
     color: colors.text,
+  },
+  settingsIcon: {
+    fontSize: 24,
   },
   subtitle: {
     fontSize: fontSize.sm,
@@ -133,7 +179,7 @@ const styles = StyleSheet.create({
   },
   statsRow: {
     flexDirection: 'row',
-    gap: spacing.md,
+    gap: spacing.sm,
     marginBottom: spacing.lg,
   },
   statCard: {
@@ -144,7 +190,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   statNumber: {
-    fontSize: fontSize.xxl,
+    fontSize: fontSize.xl,
     fontWeight: '700',
     color: colors.primary,
   },
@@ -176,12 +222,29 @@ const styles = StyleSheet.create({
     color: colors.primaryLight,
     fontSize: fontSize.sm,
   },
+  syncSection: {
+    marginBottom: spacing.md,
+  },
+  syncOption: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.sm,
+  },
+  syncOptionLabel: {
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
+  },
   syncButton: {
     backgroundColor: colors.secondary,
     borderRadius: borderRadius.md,
     padding: spacing.md,
     alignItems: 'center',
-    marginBottom: spacing.sm,
+  },
+  syncingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
   },
   syncButtonText: {
     color: colors.surface,
@@ -192,7 +255,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     color: colors.textSecondary,
     fontSize: fontSize.xs,
-    marginBottom: spacing.md,
+    marginTop: spacing.sm,
   },
   reviewButton: {
     backgroundColor: colors.warning,

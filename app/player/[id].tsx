@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Modal, TextInput } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
 import { useSQLiteContext } from 'expo-sqlite';
 import { useEffect, useState, useCallback } from 'react';
@@ -10,8 +10,9 @@ import {
   RecordingPresets,
   requestRecordingPermissionsAsync,
 } from 'expo-audio';
+import * as Haptics from 'expo-haptics';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
-import { getEpisode, insertAttempt } from '../../src/database/queries';
+import { getEpisode, insertAttempt, insertVocabCard } from '../../src/database/queries';
 import type { Episode } from '../../src/types/episode';
 
 type Mode = 'listen' | 'record' | 'compare';
@@ -25,6 +26,12 @@ export default function PlayerScreen() {
   const [recordingUri, setRecordingUri] = useState<string | null>(null);
   const [showTranscript, setShowTranscript] = useState(true);
   const [recordStartTime, setRecordStartTime] = useState(0);
+  const [saved, setSaved] = useState(false);
+
+  // Vocab save modal
+  const [saveModalVisible, setSaveModalVisible] = useState(false);
+  const [selectedWord, setSelectedWord] = useState('');
+  const [definition, setDefinition] = useState('');
 
   // Player for original audio
   const player = useAudioPlayer(
@@ -64,10 +71,12 @@ export default function PlayerScreen() {
   };
 
   const handlePlay = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     player.play();
   };
 
   const handlePause = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     player.pause();
   };
 
@@ -75,25 +84,29 @@ export default function PlayerScreen() {
     const { granted } = await requestRecordingPermissionsAsync();
     if (!granted) return;
 
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     player.pause();
     await recorder.prepareToRecordAsync();
     recorder.record();
     setRecordStartTime(Date.now());
     setMode('record');
+    setSaved(false);
   };
 
   const handleStopRecording = async () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     await recorder.stop();
-    // recordingUri is set via the statusListener callback
   };
 
   const handlePlayRecording = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (!recordingUri) return;
     player.replace(recordingUri);
     player.play();
   };
 
   const handlePlayOriginal = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (!episode) return;
     player.replace(episode.audio_local || episode.audio_url);
     player.play();
@@ -107,6 +120,8 @@ export default function PlayerScreen() {
       recording_uri: recordingUri,
       duration_ms: Date.now() - recordStartTime,
     });
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setSaved(true);
   };
 
   const handleReset = () => {
@@ -115,6 +130,19 @@ export default function PlayerScreen() {
     }
     setMode('listen');
     setRecordingUri(null);
+    setSaved(false);
+  };
+
+  const handleSaveWord = async () => {
+    if (!episode || !selectedWord.trim()) return;
+    await insertVocabCard(db, {
+      word_or_phrase: selectedWord.trim(),
+      context: episode.transcript || null,
+      definition: definition.trim() || null,
+      episode_id: episode.id,
+    });
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setSaveModalVisible(false);
   };
 
   if (loading) {
@@ -199,8 +227,12 @@ export default function PlayerScreen() {
             </TouchableOpacity>
           </View>
           <View style={styles.actionRow}>
-            <TouchableOpacity style={styles.saveButton} onPress={handleSaveAttempt}>
-              <Text style={styles.saveButtonText}>Save</Text>
+            <TouchableOpacity
+              style={[styles.saveButton, saved && styles.saveButtonSaved]}
+              onPress={handleSaveAttempt}
+              disabled={saved}
+            >
+              <Text style={styles.saveButtonText}>{saved ? '✓ Saved' : 'Save'}</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.retryButton} onPress={handleReset}>
               <Text style={styles.retryButtonText}>Try Again</Text>
@@ -209,23 +241,73 @@ export default function PlayerScreen() {
         </View>
       )}
 
-      {/* Transcript toggle */}
-      <TouchableOpacity
-        style={styles.transcriptToggle}
-        onPress={() => setShowTranscript(!showTranscript)}
-      >
-        <Text style={styles.transcriptToggleText}>
-          {showTranscript ? 'Hide Transcript' : 'Show Transcript'}
-        </Text>
-      </TouchableOpacity>
+      {/* Transcript & vocab */}
+      <View style={styles.bottomRow}>
+        <TouchableOpacity
+          style={styles.transcriptToggle}
+          onPress={() => setShowTranscript(!showTranscript)}
+        >
+          <Text style={styles.transcriptToggleText}>
+            {showTranscript ? 'Hide' : 'Show'} Transcript
+          </Text>
+        </TouchableOpacity>
+
+        {episode.transcript && (
+          <TouchableOpacity
+            style={styles.vocabButton}
+            onPress={() => setSaveModalVisible(true)}
+          >
+            <Text style={styles.vocabButtonText}>+ Save Word</Text>
+          </TouchableOpacity>
+        )}
+      </View>
 
       {showTranscript && episode.transcript && (
         <View style={styles.transcriptBox}>
-          <Text style={styles.transcriptText} numberOfLines={8}>
+          <Text style={styles.transcriptText} numberOfLines={6}>
             {episode.transcript}
           </Text>
         </View>
       )}
+
+      {/* Save Word Modal */}
+      <Modal visible={saveModalVisible} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Save to Vocabulary</Text>
+
+            <Text style={styles.modalLabel}>Word / Phrase</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={selectedWord}
+              onChangeText={setSelectedWord}
+              placeholder="Enter word or phrase"
+              autoCapitalize="none"
+            />
+
+            <Text style={styles.modalLabel}>Definition (optional)</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={definition}
+              onChangeText={setDefinition}
+              placeholder="Add a definition"
+              autoCapitalize="none"
+            />
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={styles.modalCancel}
+                onPress={() => setSaveModalVisible(false)}
+              >
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.modalSave} onPress={handleSaveWord}>
+                <Text style={styles.modalSaveText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -333,6 +415,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: spacing.md,
     marginBottom: spacing.md,
+    width: '100%',
   },
   compareButton: {
     flex: 1,
@@ -351,6 +434,7 @@ const styles = StyleSheet.create({
   actionRow: {
     flexDirection: 'row',
     gap: spacing.md,
+    width: '100%',
   },
   saveButton: {
     flex: 1,
@@ -358,6 +442,9 @@ const styles = StyleSheet.create({
     borderRadius: borderRadius.md,
     padding: spacing.sm,
     alignItems: 'center',
+  },
+  saveButtonSaved: {
+    backgroundColor: colors.success,
   },
   saveButtonText: {
     color: colors.surface,
@@ -376,15 +463,30 @@ const styles = StyleSheet.create({
     fontSize: fontSize.sm,
     fontWeight: '500',
   },
-  transcriptToggle: {
+  bottomRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: spacing.sm,
     marginBottom: spacing.sm,
+  },
+  transcriptToggle: {
+    paddingVertical: spacing.sm,
   },
   transcriptToggleText: {
     color: colors.primary,
     fontSize: fontSize.sm,
     fontWeight: '500',
+  },
+  vocabButton: {
+    backgroundColor: colors.secondary,
+    borderRadius: borderRadius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  vocabButtonText: {
+    color: colors.surface,
+    fontSize: fontSize.xs,
+    fontWeight: '600',
   },
   transcriptBox: {
     backgroundColor: colors.surface,
@@ -396,5 +498,65 @@ const styles = StyleSheet.create({
     fontSize: fontSize.sm,
     color: colors.text,
     lineHeight: 22,
+  },
+  // Modal
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: borderRadius.lg,
+    borderTopRightRadius: borderRadius.lg,
+    padding: spacing.lg,
+  },
+  modalTitle: {
+    fontSize: fontSize.lg,
+    fontWeight: '600',
+    color: colors.text,
+    marginBottom: spacing.md,
+  },
+  modalLabel: {
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
+    marginBottom: spacing.xs,
+    marginTop: spacing.sm,
+  },
+  modalInput: {
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: borderRadius.sm,
+    padding: spacing.sm,
+    fontSize: fontSize.md,
+    color: colors.text,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: spacing.md,
+    marginTop: spacing.lg,
+  },
+  modalCancel: {
+    flex: 1,
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    alignItems: 'center',
+  },
+  modalCancelText: {
+    color: colors.textSecondary,
+    fontSize: fontSize.md,
+    fontWeight: '500',
+  },
+  modalSave: {
+    flex: 1,
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    alignItems: 'center',
+  },
+  modalSaveText: {
+    color: colors.surface,
+    fontSize: fontSize.md,
+    fontWeight: '600',
   },
 });

@@ -1,6 +1,7 @@
 import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import { useSQLiteContext } from 'expo-sqlite';
 import { useEffect, useState, useCallback } from 'react';
+import * as Haptics from 'expo-haptics';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
 import { getVocabCards, getDueVocabCards, deleteVocabCard } from '../../src/database/queries';
 import type { VocabWithReview } from '../../src/types/vocab';
@@ -32,7 +33,19 @@ export default function VocabScreen() {
     setFlipped(false);
   };
 
+  const handleFlip = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setFlipped(!flipped);
+  };
+
   const handleRate = async (quality: number) => {
+    Haptics.notificationAsync(
+      quality >= 4
+        ? Haptics.NotificationFeedbackType.Success
+        : quality >= 3
+          ? Haptics.NotificationFeedbackType.Warning
+          : Haptics.NotificationFeedbackType.Error
+    );
     const card = dueCards[currentIndex];
     if (!card?.review) return;
 
@@ -60,6 +73,7 @@ export default function VocabScreen() {
   };
 
   const handleDelete = (id: number) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     Alert.alert('Delete', 'Remove this card?', [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -83,7 +97,7 @@ export default function VocabScreen() {
 
         <TouchableOpacity
           style={styles.flashcard}
-          onPress={() => setFlipped(!flipped)}
+          onPress={handleFlip}
           activeOpacity={0.8}
         >
           {!flipped ? (
