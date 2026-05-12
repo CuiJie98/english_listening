@@ -1,24 +1,38 @@
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { useSQLiteContext } from 'expo-sqlite';
-import { useEffect, useState, useCallback } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, FlatList, ActivityIndicator } from 'react-native';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'expo-router';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
-import { getEpisodes } from '../../src/database/queries';
+import { getEpisodes } from '../../src/services/apiClient';
 import type { EpisodeSummary } from '../../src/types/episode';
 
 export default function PracticeScreen() {
-  const db = useSQLiteContext();
   const router = useRouter();
   const [episodes, setEpisodes] = useState<EpisodeSummary[]>([]);
-
-  const loadEpisodes = useCallback(async () => {
-    const data = await getEpisodes(db);
-    setEpisodes(data.filter((e) => e.has_transcript));
-  }, [db]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    loadEpisodes();
-  }, [loadEpisodes]);
+    getEpisodes(1, 50)
+      .then((data) => setEpisodes(data.episodes.filter((e) => e.has_transcript)))
+      .catch((err) => setError(err?.message || 'Failed to load episodes'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
+  if (error) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.errorText}>{error}</Text>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -28,27 +42,26 @@ export default function PracticeScreen() {
       </Text>
 
       {episodes.length === 0 ? (
-        <View style={styles.emptyState}>
+        <View style={styles.center}>
           <Text style={styles.emptyText}>No episodes with text available</Text>
-          <Text style={styles.emptyHint}>
-            Sync episodes and wait for transcripts to be fetched
-          </Text>
         </View>
       ) : (
-        <View style={styles.episodeList}>
-          {episodes.slice(0, 10).map((ep) => (
+        <FlatList
+          data={episodes}
+          keyExtractor={(item) => item.id.toString()}
+          renderItem={({ item }) => (
             <TouchableOpacity
-              key={ep.id}
               style={styles.episodeCard}
-              onPress={() => router.push(`/player/${ep.id}`)}
+              onPress={() => router.push(`/player/${item.id}`)}
             >
               <Text style={styles.episodeTitle} numberOfLines={1}>
-                {ep.title}
+                {item.title}
               </Text>
-              <Text style={styles.episodeArrow}>→</Text>
+              <Text style={styles.episodeArrow}>&#8594;</Text>
             </TouchableOpacity>
-          ))}
-        </View>
+          )}
+          contentContainerStyle={styles.episodeList}
+        />
       )}
     </View>
   );
@@ -60,6 +73,11 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
     padding: spacing.lg,
   },
+  center: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   title: {
     fontSize: fontSize.xl,
     fontWeight: '700',
@@ -70,19 +88,14 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginBottom: spacing.lg,
   },
-  emptyState: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
   emptyText: {
     fontSize: fontSize.md,
     color: colors.textSecondary,
     marginBottom: spacing.sm,
   },
-  emptyHint: {
-    fontSize: fontSize.sm,
-    color: colors.textMuted,
+  errorText: {
+    color: colors.error,
+    fontSize: fontSize.md,
     textAlign: 'center',
   },
   episodeList: {

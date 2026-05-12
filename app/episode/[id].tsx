@@ -1,50 +1,46 @@
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Modal, TextInput, Alert } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useSQLiteContext } from 'expo-sqlite';
 import { useEffect, useState, useCallback } from 'react';
-import * as Haptics from 'expo-haptics';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
-import { getEpisode, insertVocabCard } from '../../src/database/queries';
-import { downloadEpisodeAudio } from '../../src/services/audioCache';
+import { getEpisode, insertVocabCard } from '../../src/services/apiClient';
 import type { Episode } from '../../src/types/episode';
 
 export default function EpisodeDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const db = useSQLiteContext();
   const router = useRouter();
   const [episode, setEpisode] = useState<Episode | null>(null);
   const [loading, setLoading] = useState(true);
-  const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState('');
 
-  // Vocab save modal
   const [saveModalVisible, setSaveModalVisible] = useState(false);
   const [selectedWord, setSelectedWord] = useState('');
   const [selectedContext, setSelectedContext] = useState('');
   const [definition, setDefinition] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const loadEpisode = useCallback(async () => {
     if (!id) return;
-    const ep = await getEpisode(db, parseInt(id, 10));
-    setEpisode(ep);
-    setLoading(false);
-  }, [db, id]);
+    const numId = parseInt(id, 10);
+    if (isNaN(numId)) {
+      setError('Invalid episode ID');
+      setLoading(false);
+      return;
+    }
+    try {
+      const ep = await getEpisode(numId);
+      setEpisode(ep);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to load episode');
+    } finally {
+      setLoading(false);
+    }
+  }, [id]);
 
   useEffect(() => {
     loadEpisode();
   }, [loadEpisode]);
 
-  const handleDownloadAudio = async () => {
-    if (!episode || downloading) return;
-    setDownloading(true);
-    const uri = await downloadEpisodeAudio(db, episode.bbc_id, episode.audio_url);
-    if (uri) {
-      await loadEpisode();
-    }
-    setDownloading(false);
-  };
-
   const handleWordLongPress = (word: string, context: string) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setSelectedWord(word);
     setSelectedContext(context);
     setDefinition('');
@@ -53,22 +49,21 @@ export default function EpisodeDetailScreen() {
 
   const handleSaveWord = async () => {
     if (!episode || !selectedWord.trim()) return;
-    await insertVocabCard(db, {
-      word_or_phrase: selectedWord.trim(),
-      context: selectedContext || null,
-      definition: definition.trim() || null,
-      episode_id: episode.id,
-    });
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    setSaveModalVisible(false);
-  };
-
-  const handleSaveSentence = (sentence: string) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    setSelectedWord(sentence.trim());
-    setSelectedContext(sentence.trim());
-    setDefinition('');
-    setSaveModalVisible(true);
+    setSaving(true);
+    try {
+      await insertVocabCard({
+        word_or_phrase: selectedWord.trim(),
+        context: selectedContext || undefined,
+        definition: definition.trim() || undefined,
+        episode_id: episode.id,
+      });
+      Alert.alert('Saved', `"${selectedWord.trim()}" added to vocabulary.`);
+      setSaveModalVisible(false);
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Failed to save word');
+    } finally {
+      setSaving(false);
+    }
   };
 
   if (loading) {
@@ -79,10 +74,13 @@ export default function EpisodeDetailScreen() {
     );
   }
 
-  if (!episode) {
+  if (error || !episode) {
     return (
       <View style={styles.center}>
-        <Text style={styles.errorText}>Episode not found</Text>
+        <Text style={styles.errorText}>{error || 'Episode not found'}</Text>
+        <TouchableOpacity style={styles.retryButton} onPress={loadEpisode}>
+          <Text style={styles.retryButtonText}>Retry</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -101,33 +99,13 @@ export default function EpisodeDetailScreen() {
       <Text style={styles.title}>{episode.title}</Text>
       <Text style={styles.date}>{formatDate(episode.published_at)}</Text>
 
-      {/* Actions */}
       <View style={styles.actionRow}>
         <TouchableOpacity
           style={styles.playButton}
           onPress={() => router.push(`/player/${episode.id}`)}
         >
-          <Text style={styles.playButtonText}>▶ Play & Practice</Text>
+          <Text style={styles.playButtonText}>Play & Practice</Text>
         </TouchableOpacity>
-
-        {!episode.audio_local && (
-          <TouchableOpacity
-            style={[styles.downloadButton, downloading && styles.downloadButtonDisabled]}
-            onPress={handleDownloadAudio}
-            disabled={downloading}
-          >
-            {downloading ? (
-              <ActivityIndicator color={colors.primary} size="small" />
-            ) : (
-              <Text style={styles.downloadButtonText}>⬇ Download</Text>
-            )}
-          </TouchableOpacity>
-        )}
-        {episode.audio_local && (
-          <View style={styles.downloadedBadge}>
-            <Text style={styles.downloadedText}>✓ Offline</Text>
-          </View>
-        )}
       </View>
 
       {episode.description && (
@@ -137,13 +115,32 @@ export default function EpisodeDetailScreen() {
         </View>
       )}
 
-      {/* Transcript */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Transcript</Text>
-          <Text style={styles.hintText}>Long-press to save words</Text>
+          <Text style={styles.hintText}>Long-press a line to save words</Text>
         </View>
-        {episode.transcript ? (
+        {episode.transcript_segments && episode.transcript_segments.length > 0 ? (
+          <View style={styles.transcriptContainer}>
+            {episode.transcript_segments.map((seg, i) => (
+              <TouchableOpacity
+                key={i}
+                style={styles.transcriptLine}
+                onLongPress={() => handleWordLongPress(seg.text.split(/\s+/)[0] || seg.text, seg.text)}
+                delayLongPress={500}
+              >
+                {seg.speaker ? (
+                  <Text style={styles.transcriptText}>
+                    <Text style={styles.transcriptSpeaker}>{seg.speaker}: </Text>
+                    {seg.text}
+                  </Text>
+                ) : (
+                  <Text style={styles.transcriptText}>{seg.text}</Text>
+                )}
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : episode.transcript ? (
           <View style={styles.transcriptContainer}>
             {episode.transcript.split('\n').filter(Boolean).map((line, i) => {
               const trimmed = line.trim();
@@ -152,12 +149,7 @@ export default function EpisodeDetailScreen() {
                 <TouchableOpacity
                   key={i}
                   style={styles.transcriptLine}
-                  onLongPress={() => {
-                    const words = trimmed.split(/\s+/);
-                    if (words.length > 0) {
-                      handleWordLongPress(words[0], trimmed);
-                    }
-                  }}
+                  onLongPress={() => handleWordLongPress(trimmed.split(/\s+/)[0] || trimmed, trimmed)}
                   delayLongPress={500}
                 >
                   <Text style={styles.transcriptText}>{trimmed}</Text>
@@ -176,7 +168,6 @@ export default function EpisodeDetailScreen() {
         )}
       </View>
 
-      {/* Save Word Modal */}
       <Modal visible={saveModalVisible} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -203,7 +194,7 @@ export default function EpisodeDetailScreen() {
             {selectedContext ? (
               <>
                 <Text style={styles.modalLabel}>Context</Text>
-                <Text style={styles.modalContext}>"{selectedContext}"</Text>
+                <Text style={styles.modalContext}>&ldquo;{selectedContext}&rdquo;</Text>
               </>
             ) : null}
 
@@ -214,8 +205,12 @@ export default function EpisodeDetailScreen() {
               >
                 <Text style={styles.modalCancelText}>Cancel</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.modalSave} onPress={handleSaveWord}>
-                <Text style={styles.modalSaveText}>Save</Text>
+              <TouchableOpacity
+                style={[styles.modalSave, saving && styles.modalSaveDisabled]}
+                onPress={handleSaveWord}
+                disabled={saving}
+              >
+                <Text style={styles.modalSaveText}>{saving ? 'Saving...' : 'Save'}</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -237,6 +232,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    padding: spacing.lg,
   },
   title: {
     fontSize: fontSize.xl,
@@ -264,33 +260,6 @@ const styles = StyleSheet.create({
   playButtonText: {
     color: colors.surface,
     fontSize: fontSize.md,
-    fontWeight: '600',
-  },
-  downloadButton: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
-    padding: spacing.md,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  downloadButtonDisabled: {
-    opacity: 0.6,
-  },
-  downloadButtonText: {
-    color: colors.primary,
-    fontSize: fontSize.md,
-    fontWeight: '500',
-  },
-  downloadedBadge: {
-    backgroundColor: colors.successLight,
-    borderRadius: borderRadius.md,
-    padding: spacing.md,
-    justifyContent: 'center',
-  },
-  downloadedText: {
-    color: colors.success,
-    fontSize: fontSize.sm,
     fontWeight: '600',
   },
   section: {
@@ -331,6 +300,10 @@ const styles = StyleSheet.create({
     color: colors.text,
     lineHeight: 24,
   },
+  transcriptSpeaker: {
+    fontWeight: '700',
+    color: colors.primary,
+  },
   noTranscript: {
     backgroundColor: colors.surfaceAlt,
     borderRadius: borderRadius.md,
@@ -344,8 +317,20 @@ const styles = StyleSheet.create({
   errorText: {
     color: colors.error,
     fontSize: fontSize.md,
+    textAlign: 'center',
+    marginBottom: spacing.md,
   },
-  // Modal styles
+  retryButton: {
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  retryButtonText: {
+    color: colors.surface,
+    fontSize: fontSize.md,
+    fontWeight: '600',
+  },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
@@ -405,6 +390,9 @@ const styles = StyleSheet.create({
     borderRadius: borderRadius.md,
     padding: spacing.md,
     alignItems: 'center',
+  },
+  modalSaveDisabled: {
+    opacity: 0.5,
   },
   modalSaveText: {
     color: colors.surface,

@@ -1,12 +1,9 @@
 import { Stack } from 'expo-router';
-import { SQLiteProvider } from 'expo-sqlite';
 import { StatusBar } from 'expo-status-bar';
-import { initDatabase } from '../src/database/schema';
-import { config } from '../src/constants/config';
 
 export default function RootLayout() {
   return (
-    <SQLiteProvider databaseName={config.dbName} onInit={initDatabase}>
+    <>
       <StatusBar style="dark" />
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="(tabs)" />
@@ -23,6 +20,6 @@ export default function RootLayout() {
           options={{ headerShown: true, title: 'Settings', presentation: 'modal' }}
         />
       </Stack>
-    </SQLiteProvider>
+    </>
   );
 }

@@ -1,26 +1,39 @@
-import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
-import { useSQLiteContext } from 'expo-sqlite';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, FlatList, ActivityIndicator } from 'react-native';
 import { useEffect, useState, useCallback } from 'react';
-import * as Haptics from 'expo-haptics';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
-import { getVocabCards, getDueVocabCards, deleteVocabCard } from '../../src/database/queries';
-import type { VocabWithReview } from '../../src/types/vocab';
-import { calculateNextReview } from '../../src/utils/spacedRepetition';
+import {
+  getVocabCards,
+  getDueVocabCards,
+  deleteVocabCard,
+  submitReview,
+  type VocabWithReview,
+} from '../../src/services/apiClient';
 
 export default function VocabScreen() {
-  const db = useSQLiteContext();
   const [cards, setCards] = useState<VocabWithReview[]>([]);
   const [dueCards, setDueCards] = useState<VocabWithReview[]>([]);
   const [reviewMode, setReviewMode] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [flipped, setFlipped] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   const loadCards = useCallback(async () => {
-    const allCards = await getVocabCards(db);
-    const due = await getDueVocabCards(db);
-    setCards(allCards);
-    setDueCards(due);
-  }, [db]);
+    try {
+      setError('');
+      const [allCards, due] = await Promise.all([
+        getVocabCards(),
+        getDueVocabCards(),
+      ]);
+      setCards(allCards);
+      setDueCards(due);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to load vocabulary');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     loadCards();
@@ -34,58 +47,67 @@ export default function VocabScreen() {
   };
 
   const handleFlip = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setFlipped(!flipped);
   };
 
   const handleRate = async (quality: number) => {
-    Haptics.notificationAsync(
-      quality >= 4
-        ? Haptics.NotificationFeedbackType.Success
-        : quality >= 3
-          ? Haptics.NotificationFeedbackType.Warning
-          : Haptics.NotificationFeedbackType.Error
-    );
+    if (submitting) return;
     const card = dueCards[currentIndex];
-    if (!card?.review) return;
+    if (!card) return;
 
-    const result = calculateNextReview({
-      easiness: card.review.easiness,
-      interval: card.review.interval_days,
-      repetitions: card.review.repetitions,
-      quality,
-    });
-
-    await db.runAsync(
-      `INSERT OR REPLACE INTO review_state
-       (card_id, easiness, interval_days, repetitions, next_review, last_review)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [card.id, result.easiness, result.interval, result.repetitions, result.nextReview, Math.floor(Date.now() / 1000)]
-    );
-
-    if (currentIndex + 1 < dueCards.length) {
-      setCurrentIndex(currentIndex + 1);
-      setFlipped(false);
-    } else {
-      setReviewMode(false);
-      await loadCards();
+    setSubmitting(true);
+    try {
+      await submitReview(card.id, quality);
+      if (currentIndex + 1 < dueCards.length) {
+        setCurrentIndex(currentIndex + 1);
+        setFlipped(false);
+      } else {
+        setReviewMode(false);
+        await loadCards();
+      }
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Failed to submit review');
+    } finally {
+      setSubmitting(false);
     }
   };
 
   const handleDelete = (id: number) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     Alert.alert('Delete', 'Remove this card?', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
         style: 'destructive',
         onPress: async () => {
-          await deleteVocabCard(db, id);
-          await loadCards();
+          try {
+            await deleteVocabCard(id);
+            await loadCards();
+          } catch (err: any) {
+            Alert.alert('Error', err?.message || 'Failed to delete card');
+          }
         },
       },
     ]);
   };
+
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
+  if (error) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.errorText}>{error}</Text>
+        <TouchableOpacity style={styles.retryButton} onPress={loadCards}>
+          <Text style={styles.retryButtonText}>Retry</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   if (reviewMode && dueCards.length > 0) {
     const card = dueCards[currentIndex];
@@ -109,7 +131,7 @@ export default function VocabScreen() {
                 <Text style={styles.flashcardDef}>{card.definition}</Text>
               )}
               {card.context && (
-                <Text style={styles.flashcardContext}>"{card.context}"</Text>
+                <Text style={styles.flashcardContext}>&ldquo;{card.context}&rdquo;</Text>
               )}
             </View>
           )}
@@ -127,8 +149,9 @@ export default function VocabScreen() {
             ].map(({ q, label, color }) => (
               <TouchableOpacity
                 key={q}
-                style={[styles.rateButton, { backgroundColor: color }]}
+                style={[styles.rateButton, { backgroundColor: color }, submitting && styles.rateButtonDisabled]}
                 onPress={() => handleRate(q)}
+                disabled={submitting}
               >
                 <Text style={styles.rateButtonText}>{label}</Text>
               </TouchableOpacity>
@@ -158,7 +181,7 @@ export default function VocabScreen() {
           <Text style={styles.reviewBannerText}>
             {dueCards.length} cards due for review
           </Text>
-          <Text style={styles.reviewBannerAction}>Start →</Text>
+          <Text style={styles.reviewBannerAction}>Start</Text>
         </TouchableOpacity>
       )}
 
@@ -170,27 +193,29 @@ export default function VocabScreen() {
           </Text>
         </View>
       ) : (
-        <View style={styles.cardList}>
-          {cards.map((card) => (
+        <FlatList
+          data={cards}
+          keyExtractor={(item) => item.id.toString()}
+          renderItem={({ item }) => (
             <TouchableOpacity
-              key={card.id}
               style={styles.vocabCard}
-              onLongPress={() => handleDelete(card.id)}
+              onLongPress={() => handleDelete(item.id)}
             >
-              <Text style={styles.vocabWord}>{card.word_or_phrase}</Text>
-              {card.definition && (
+              <Text style={styles.vocabWord}>{item.word_or_phrase}</Text>
+              {item.definition && (
                 <Text style={styles.vocabDef} numberOfLines={1}>
-                  {card.definition}
+                  {item.definition}
                 </Text>
               )}
-              {card.context && (
+              {item.context && (
                 <Text style={styles.vocabContext} numberOfLines={1}>
-                  "{card.context}"
+                  &ldquo;{item.context}&rdquo;
                 </Text>
               )}
             </TouchableOpacity>
-          ))}
-        </View>
+          )}
+          contentContainerStyle={styles.cardList}
+        />
       )}
     </View>
   );
@@ -201,6 +226,11 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
     padding: spacing.lg,
+  },
+  center: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   header: {
     flexDirection: 'row',
@@ -251,8 +281,26 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textAlign: 'center',
   },
+  errorText: {
+    color: colors.error,
+    fontSize: fontSize.md,
+    textAlign: 'center',
+    marginBottom: spacing.md,
+  },
+  retryButton: {
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  retryButtonText: {
+    color: colors.surface,
+    fontSize: fontSize.md,
+    fontWeight: '600',
+  },
   cardList: {
     gap: spacing.sm,
+    paddingBottom: spacing.lg,
   },
   vocabCard: {
     backgroundColor: colors.surface,
@@ -275,7 +323,6 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
     marginTop: spacing.xs,
   },
-  // Review mode styles
   progress: {
     textAlign: 'center',
     color: colors.textSecondary,
@@ -326,6 +373,9 @@ const styles = StyleSheet.create({
     borderRadius: borderRadius.md,
     padding: spacing.sm,
     alignItems: 'center',
+  },
+  rateButtonDisabled: {
+    opacity: 0.5,
   },
   rateButtonText: {
     color: colors.surface,

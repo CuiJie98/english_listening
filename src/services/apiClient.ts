@@ -1,0 +1,139 @@
+import type { Episode, EpisodeSummary } from '../types/episode';
+import { API_BASE } from '../constants/config';
+
+function getUserId(): string {
+  if (typeof window === 'undefined') return 'anonymous';
+  let id = localStorage.getItem('user_id');
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem('user_id', id);
+  }
+  return id;
+}
+
+function headers(): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    'X-User-Id': getUserId(),
+  };
+}
+
+async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
+  let resp: Response;
+  try {
+    resp = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: { ...headers(), ...options?.headers },
+    });
+  } catch {
+    throw new Error('Network error. Please check your connection.');
+  }
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: resp.statusText }));
+    throw new Error(err.error || `API error: ${resp.status}`);
+  }
+  if (resp.status === 204 || options?.method === 'DELETE') {
+    return undefined as T;
+  }
+  return resp.json();
+}
+
+// ── Episodes ──
+
+export async function getEpisodes(page = 1, limit = 50): Promise<{ episodes: EpisodeSummary[]; total: number }> {
+  return apiFetch(`/api/episodes?page=${page}&limit=${limit}`);
+}
+
+export async function getEpisode(id: number): Promise<Episode> {
+  return apiFetch(`/api/episodes/${id}`);
+}
+
+// ── Audio ──
+
+export function getAudioUrl(bbcId: string): string {
+  return `${API_BASE}/api/audio/${encodeURIComponent(bbcId)}`;
+}
+
+// ── Vocab ──
+
+export interface VocabWithReview {
+  id: number;
+  user_id: string;
+  word_or_phrase: string;
+  context: string | null;
+  definition: string | null;
+  episode_id: number | null;
+  created_at: number;
+  easiness: number;
+  interval_days: number;
+  repetitions: number;
+  next_review: number;
+  last_review: number | null;
+}
+
+export async function getVocabCards(): Promise<VocabWithReview[]> {
+  const data = await apiFetch<{ cards: VocabWithReview[] }>('/api/vocab');
+  return data.cards;
+}
+
+export async function getDueVocabCards(): Promise<VocabWithReview[]> {
+  const data = await apiFetch<{ cards: VocabWithReview[] }>('/api/vocab/due');
+  return data.cards;
+}
+
+export async function insertVocabCard(card: {
+  word_or_phrase: string;
+  context?: string;
+  definition?: string;
+  episode_id?: number;
+}): Promise<number> {
+  const data = await apiFetch<{ id: number }>('/api/vocab', {
+    method: 'POST',
+    body: JSON.stringify(card),
+  });
+  return data.id;
+}
+
+export async function deleteVocabCard(id: number): Promise<void> {
+  await apiFetch(`/api/vocab/${id}`, { method: 'DELETE' });
+}
+
+export interface ReviewResult {
+  easiness: number;
+  interval_days: number;
+  repetitions: number;
+  next_review: number;
+}
+
+export async function submitReview(cardId: number, quality: number): Promise<ReviewResult> {
+  return apiFetch(`/api/vocab/${cardId}/review`, {
+    method: 'POST',
+    body: JSON.stringify({ quality }),
+  });
+}
+
+// ── Attempts ──
+
+export async function insertAttempt(attempt: {
+  episode_id: number;
+  type: 'listen' | 'shadow';
+  duration_ms?: number;
+}): Promise<number> {
+  const data = await apiFetch<{ id: number }>('/api/attempts', {
+    method: 'POST',
+    body: JSON.stringify(attempt),
+  });
+  return data.id;
+}
+
+// ── Stats ──
+
+export interface Stats {
+  streak: number;
+  dueCount: number;
+  totalEpisodes: number;
+}
+
+export async function getStats(): Promise<Stats> {
+  return apiFetch('/api/stats');
+}

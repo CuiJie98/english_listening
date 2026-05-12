@@ -1,67 +1,99 @@
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Modal, TextInput } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Modal, TextInput, Alert } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
-import { useSQLiteContext } from 'expo-sqlite';
-import { useEffect, useState, useCallback } from 'react';
-import {
-  useAudioPlayer,
-  useAudioPlayerStatus,
-  useAudioRecorder,
-  useAudioRecorderState,
-  RecordingPresets,
-  requestRecordingPermissionsAsync,
-} from 'expo-audio';
-import * as Haptics from 'expo-haptics';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
-import { getEpisode, insertAttempt, insertVocabCard } from '../../src/database/queries';
+import { SPEED_OPTIONS } from '../../src/constants/config';
+import { getEpisode, insertAttempt, insertVocabCard, getAudioUrl } from '../../src/services/apiClient';
+import { WebAudioPlayer } from '../../src/components/WebAudioPlayer';
+import { WebAudioRecorder } from '../../src/components/WebAudioRecorder';
 import type { Episode } from '../../src/types/episode';
 
 type Mode = 'listen' | 'record' | 'compare';
 
 export default function PlayerScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const db = useSQLiteContext();
   const [episode, setEpisode] = useState<Episode | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [mode, setMode] = useState<Mode>('listen');
-  const [recordingUri, setRecordingUri] = useState<string | null>(null);
   const [showTranscript, setShowTranscript] = useState(true);
-  const [recordStartTime, setRecordStartTime] = useState(0);
   const [saved, setSaved] = useState(false);
+  const [recordStartTime, setRecordStartTime] = useState(0);
 
-  // Vocab save modal
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [playbackRate, setPlaybackRate] = useState(1.0);
+  const [isRecording, setIsRecording] = useState(false);
+  const [progressBarWidth, setProgressBarWidth] = useState(1);
+
   const [saveModalVisible, setSaveModalVisible] = useState(false);
   const [selectedWord, setSelectedWord] = useState('');
   const [definition, setDefinition] = useState('');
 
-  // Player for original audio
-  const player = useAudioPlayer(
-    episode ? (episode.audio_local || episode.audio_url) : undefined,
-    { updateInterval: 250 }
-  );
-  const playerStatus = useAudioPlayerStatus(player);
+  const originalPlayerRef = useRef<WebAudioPlayer | null>(null);
+  const recordingPlayerRef = useRef<WebAudioPlayer | null>(null);
+  const recorderRef = useRef<WebAudioRecorder | null>(null);
+  const recordingUrlRef = useRef<string | null>(null);
+  const activePlayerRef = useRef<'original' | 'recording'>('original');
 
-  // Recorder
-  const recorder = useAudioRecorder(
-    RecordingPresets.HIGH_QUALITY,
-    (status) => {
-      if (status.isFinished && status.url) {
-        setRecordingUri(status.url);
-        setMode('compare');
-      }
-    }
-  );
-  const recorderState = useAudioRecorderState(recorder);
+  const getActivePlayer = () =>
+    activePlayerRef.current === 'recording' ? recordingPlayerRef.current : originalPlayerRef.current;
 
   const loadEpisode = useCallback(async () => {
     if (!id) return;
-    const ep = await getEpisode(db, parseInt(id, 10));
-    setEpisode(ep);
-    setLoading(false);
-  }, [db, id]);
+    const numId = parseInt(id, 10);
+    if (isNaN(numId)) {
+      setError('Invalid episode ID');
+      setLoading(false);
+      return;
+    }
+    try {
+      const ep = await getEpisode(numId);
+      setEpisode(ep);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to load episode');
+    } finally {
+      setLoading(false);
+    }
+  }, [id]);
 
   useEffect(() => {
     loadEpisode();
-  }, [loadEpisode]);
+    return () => {
+      originalPlayerRef.current?.destroy();
+      recordingPlayerRef.current?.destroy();
+      recorderRef.current?.destroy();
+      if (recordingUrlRef.current) URL.revokeObjectURL(recordingUrlRef.current);
+    };
+  }, []);
+
+  // Initialize original player when episode loads
+  useEffect(() => {
+    if (!episode) return;
+
+    const savedRate = typeof window !== 'undefined' ? localStorage.getItem('playback_speed') : null;
+    const rate = savedRate ? parseFloat(savedRate) : 1.0;
+    setPlaybackRate(rate);
+
+    const audioSrc = getAudioUrl(episode.bbc_id);
+    const player = new WebAudioPlayer(audioSrc);
+    player.setPlaybackRate(rate);
+
+    player.onTimeUpdate((time) => {
+      setCurrentTime(time);
+      setIsPlaying(true);
+    });
+    player.onEnded(() => setIsPlaying(false));
+    player.onLoaded(() => setDuration(player.getDuration()));
+
+    originalPlayerRef.current = player;
+    activePlayerRef.current = 'original';
+
+    return () => {
+      player.destroy();
+    };
+  }, [episode?.id]);
 
   const formatTime = (seconds: number) => {
     const totalSec = Math.floor(seconds);
@@ -70,79 +102,161 @@ export default function PlayerScreen() {
     return `${min}:${sec.toString().padStart(2, '0')}`;
   };
 
-  const handlePlay = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    player.play();
+  const handlePlayPause = () => {
+    const player = getActivePlayer();
+    if (!player) return;
+    if (player.isPlaying()) {
+      player.pause();
+      setIsPlaying(false);
+    } else {
+      player.play();
+      setIsPlaying(true);
+    }
   };
 
-  const handlePause = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    player.pause();
+  const handleSeek = (fraction: number) => {
+    const player = getActivePlayer();
+    if (!player || !duration) return;
+    const clamped = Math.max(0, Math.min(1, fraction));
+    player.seekTo(clamped * duration);
+  };
+
+  const handleSpeedCycle = () => {
+    const idx = SPEED_OPTIONS.indexOf(playbackRate);
+    const next = SPEED_OPTIONS[(idx + 1) % SPEED_OPTIONS.length];
+    originalPlayerRef.current?.setPlaybackRate(next);
+    recordingPlayerRef.current?.setPlaybackRate(next);
+    setPlaybackRate(next);
+    if (typeof window !== 'undefined') localStorage.setItem('playback_speed', next.toString());
+  };
+
+  const switchToOriginal = () => {
+    recordingPlayerRef.current?.pause();
+    originalPlayerRef.current?.setPlaybackRate(playbackRate);
+    activePlayerRef.current = 'original';
+    setCurrentTime(originalPlayerRef.current?.getCurrentTime() || 0);
+    setDuration(originalPlayerRef.current?.getDuration() || 0);
+  };
+
+  const switchToRecording = () => {
+    originalPlayerRef.current?.pause();
+    if (!recordingUrlRef.current) return;
+
+    if (!recordingPlayerRef.current) {
+      const recPlayer = new WebAudioPlayer(recordingUrlRef.current);
+      recPlayer.setPlaybackRate(playbackRate);
+      recPlayer.onTimeUpdate((t) => {
+        if (activePlayerRef.current === 'recording') setCurrentTime(t);
+      });
+      recPlayer.onEnded(() => {
+        if (activePlayerRef.current === 'recording') setIsPlaying(false);
+      });
+      recPlayer.onLoaded(() => {
+        if (activePlayerRef.current === 'recording') setDuration(recPlayer.getDuration());
+      });
+      recordingPlayerRef.current = recPlayer;
+    }
+    activePlayerRef.current = 'recording';
+    setCurrentTime(recordingPlayerRef.current.getCurrentTime() || 0);
+    setDuration(recordingPlayerRef.current.getDuration() || 0);
   };
 
   const handleStartRecording = async () => {
-    const { granted } = await requestRecordingPermissionsAsync();
-    if (!granted) return;
+    const recorder = new WebAudioRecorder();
+    const ok = await recorder.requestPermission();
+    if (!ok) {
+      Alert.alert('Permission', 'Microphone permission is required for recording.');
+      return;
+    }
 
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-    player.pause();
-    await recorder.prepareToRecordAsync();
-    recorder.record();
+    originalPlayerRef.current?.pause();
+    setIsPlaying(false);
+
+    await recorder.start();
+    recorderRef.current = recorder;
+    setIsRecording(true);
     setRecordStartTime(Date.now());
     setMode('record');
     setSaved(false);
   };
 
   const handleStopRecording = async () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-    await recorder.stop();
+    const recorder = recorderRef.current;
+    if (!recorder) return;
+
+    const blob = await recorder.stop();
+    recorder.destroy();
+    recorderRef.current = null;
+    setIsRecording(false);
+
+    // Clean up old recording
+    if (recordingUrlRef.current) URL.revokeObjectURL(recordingUrlRef.current);
+    recordingPlayerRef.current?.destroy();
+    recordingPlayerRef.current = null;
+
+    const url = URL.createObjectURL(blob);
+    recordingUrlRef.current = url;
+    setMode('compare');
+    switchToOriginal();
   };
 
   const handlePlayRecording = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    if (!recordingUri) return;
-    player.replace(recordingUri);
-    player.play();
+    switchToRecording();
+    recordingPlayerRef.current?.play();
+    setIsPlaying(true);
   };
 
   const handlePlayOriginal = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    if (!episode) return;
-    player.replace(episode.audio_local || episode.audio_url);
-    player.play();
+    switchToOriginal();
+    originalPlayerRef.current?.play();
+    setIsPlaying(true);
   };
 
   const handleSaveAttempt = async () => {
-    if (!episode || !recordingUri) return;
-    await insertAttempt(db, {
-      episode_id: episode.id,
-      type: 'shadow',
-      recording_uri: recordingUri,
-      duration_ms: Date.now() - recordStartTime,
-    });
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    setSaved(true);
+    if (!episode) return;
+    try {
+      await insertAttempt({
+        episode_id: episode.id,
+        type: 'shadow',
+        duration_ms: Date.now() - recordStartTime,
+      });
+      setSaved(true);
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Failed to save attempt');
+    }
   };
 
   const handleReset = () => {
-    if (episode) {
-      player.replace(episode.audio_local || episode.audio_url);
-    }
+    recordingPlayerRef.current?.pause();
+    originalPlayerRef.current?.pause();
+    switchToOriginal();
     setMode('listen');
-    setRecordingUri(null);
     setSaved(false);
+    setCurrentTime(0);
+    setIsPlaying(false);
+    originalPlayerRef.current?.seekTo(0);
+  };
+
+  const handleOpenSaveWord = () => {
+    setSelectedWord('');
+    setDefinition('');
+    setSaveModalVisible(true);
   };
 
   const handleSaveWord = async () => {
     if (!episode || !selectedWord.trim()) return;
-    await insertVocabCard(db, {
-      word_or_phrase: selectedWord.trim(),
-      context: episode.transcript || null,
-      definition: definition.trim() || null,
-      episode_id: episode.id,
-    });
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    setSaveModalVisible(false);
+    try {
+      await insertVocabCard({
+        word_or_phrase: selectedWord.trim(),
+        context: episode.transcript || undefined,
+        definition: definition.trim() || undefined,
+        episode_id: episode.id,
+      });
+      Alert.alert('Saved', `"${selectedWord.trim()}" added to vocabulary.`);
+      setSaveModalVisible(false);
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Failed to save word');
+    }
   };
 
   if (loading) {
@@ -153,49 +267,55 @@ export default function PlayerScreen() {
     );
   }
 
-  if (!episode) {
+  if (error || !episode) {
     return (
       <View style={styles.center}>
-        <Text>Episode not found</Text>
+        <Text style={styles.errorText}>{error || 'Episode not found'}</Text>
+        <TouchableOpacity style={styles.retryButton} onPress={loadEpisode}>
+          <Text style={styles.retryButtonText}>Retry</Text>
+        </TouchableOpacity>
       </View>
     );
   }
 
-  const progress = playerStatus.duration > 0
-    ? playerStatus.currentTime / playerStatus.duration
-    : 0;
+  const progress = duration > 0 ? currentTime / duration : 0;
 
   return (
     <View style={styles.container}>
       <Text style={styles.title} numberOfLines={2}>{episode.title}</Text>
 
       {/* Progress bar */}
-      <View style={styles.progressBar}>
+      <View
+        style={styles.progressBar}
+        onLayout={(e) => setProgressBarWidth(e.nativeEvent.layout.width)}
+      >
         <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
+        <TouchableOpacity
+          style={styles.progressTouch}
+          onPress={(e) => {
+            handleSeek(e.nativeEvent.locationX / progressBarWidth);
+          }}
+        />
       </View>
       <View style={styles.timeRow}>
-        <Text style={styles.timeText}>{formatTime(playerStatus.currentTime)}</Text>
-        <Text style={styles.timeText}>{formatTime(playerStatus.duration)}</Text>
+        <Text style={styles.timeText}>{formatTime(currentTime)}</Text>
+        <Text style={styles.timeText}>{formatTime(duration)}</Text>
       </View>
 
       {/* Playback controls */}
       <View style={styles.controlRow}>
-        {playerStatus.playing ? (
-          <TouchableOpacity style={styles.controlButton} onPress={handlePause}>
-            <Text style={styles.controlIcon}>⏸</Text>
-          </TouchableOpacity>
-        ) : (
-          <TouchableOpacity style={styles.controlButton} onPress={handlePlay}>
-            <Text style={styles.controlIcon}>▶️</Text>
-          </TouchableOpacity>
-        )}
+        <TouchableOpacity style={styles.controlButton} onPress={handlePlayPause}>
+          <Text style={styles.controlIcon}>{isPlaying ? '||' : '>'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.speedButton} onPress={handleSpeedCycle}>
+          <Text style={styles.speedText}>{playbackRate}x</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Mode-specific section */}
       {mode === 'listen' && (
         <View style={styles.section}>
           <TouchableOpacity style={styles.recordStartButton} onPress={handleStartRecording}>
-            <Text style={styles.recordStartIcon}>🎤</Text>
             <Text style={styles.recordStartText}>Start Shadowing</Text>
           </TouchableOpacity>
         </View>
@@ -204,13 +324,13 @@ export default function PlayerScreen() {
       {mode === 'record' && (
         <View style={styles.section}>
           <Text style={styles.recordLabel}>
-            {recorderState.isRecording ? 'Recording...' : 'Preparing...'}
+            {isRecording ? 'Recording...' : 'Preparing...'}
           </Text>
           <TouchableOpacity
             style={[styles.recordButton, styles.recordButtonActive]}
             onPress={handleStopRecording}
           >
-            <Text style={styles.recordIcon}>⏹</Text>
+            <Text style={styles.recordIcon}>Stop</Text>
           </TouchableOpacity>
         </View>
       )}
@@ -219,11 +339,17 @@ export default function PlayerScreen() {
         <View style={styles.section}>
           <Text style={styles.compareLabel}>Compare your recording</Text>
           <View style={styles.compareRow}>
-            <TouchableOpacity style={styles.compareButton} onPress={handlePlayOriginal}>
-              <Text style={styles.compareButtonText}>▶ Original</Text>
+            <TouchableOpacity
+              style={[styles.compareButton, activePlayerRef.current === 'original' && styles.compareButtonActive]}
+              onPress={handlePlayOriginal}
+            >
+              <Text style={styles.compareButtonText}>Original</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.compareButton} onPress={handlePlayRecording}>
-              <Text style={styles.compareButtonText}>▶ Mine</Text>
+            <TouchableOpacity
+              style={[styles.compareButton, activePlayerRef.current === 'recording' && styles.compareButtonActive]}
+              onPress={handlePlayRecording}
+            >
+              <Text style={styles.compareButtonText}>Mine</Text>
             </TouchableOpacity>
           </View>
           <View style={styles.actionRow}>
@@ -232,10 +358,10 @@ export default function PlayerScreen() {
               onPress={handleSaveAttempt}
               disabled={saved}
             >
-              <Text style={styles.saveButtonText}>{saved ? '✓ Saved' : 'Save'}</Text>
+              <Text style={styles.saveButtonText}>{saved ? 'Saved' : 'Save'}</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.retryButton} onPress={handleReset}>
-              <Text style={styles.retryButtonText}>Try Again</Text>
+            <TouchableOpacity style={styles.retryButtonSmall} onPress={handleReset}>
+              <Text style={styles.retryButtonSmallText}>Try Again</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -255,18 +381,26 @@ export default function PlayerScreen() {
         {episode.transcript && (
           <TouchableOpacity
             style={styles.vocabButton}
-            onPress={() => setSaveModalVisible(true)}
+            onPress={handleOpenSaveWord}
           >
             <Text style={styles.vocabButtonText}>+ Save Word</Text>
           </TouchableOpacity>
         )}
       </View>
 
-      {showTranscript && episode.transcript && (
+      {showTranscript && (episode.transcript_segments?.length || episode.transcript) && (
         <View style={styles.transcriptBox}>
-          <Text style={styles.transcriptText} numberOfLines={6}>
-            {episode.transcript}
-          </Text>
+          {episode.transcript_segments && episode.transcript_segments.length > 0 ? (
+            <Text style={styles.transcriptText} numberOfLines={6}>
+              {episode.transcript_segments.map((seg) =>
+                seg.speaker ? `${seg.speaker}: ${seg.text}` : seg.text
+              ).join('\n')}
+            </Text>
+          ) : (
+            <Text style={styles.transcriptText} numberOfLines={6}>
+              {episode.transcript}
+            </Text>
+          )}
         </View>
       )}
 
@@ -322,6 +456,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    padding: spacing.lg,
   },
   title: {
     fontSize: fontSize.lg,
@@ -335,11 +470,22 @@ const styles = StyleSheet.create({
     backgroundColor: colors.border,
     borderRadius: 2,
     marginBottom: spacing.xs,
+    position: 'relative',
   },
   progressFill: {
     height: '100%',
     backgroundColor: colors.primary,
     borderRadius: 2,
+    position: 'absolute',
+    left: 0,
+    top: 0,
+  },
+  progressTouch: {
+    position: 'absolute',
+    top: -10,
+    left: 0,
+    right: 0,
+    bottom: -10,
   },
   timeRow: {
     flexDirection: 'row',
@@ -353,6 +499,8 @@ const styles = StyleSheet.create({
   controlRow: {
     flexDirection: 'row',
     justifyContent: 'center',
+    alignItems: 'center',
+    gap: spacing.md,
     marginBottom: spacing.lg,
   },
   controlButton: {
@@ -365,6 +513,23 @@ const styles = StyleSheet.create({
   },
   controlIcon: {
     fontSize: 28,
+    color: colors.surface,
+    fontWeight: '700',
+  },
+  speedButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: colors.surface,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  speedText: {
+    fontSize: fontSize.sm,
+    fontWeight: '600',
+    color: colors.text,
   },
   section: {
     alignItems: 'center',
@@ -375,12 +540,6 @@ const styles = StyleSheet.create({
     borderRadius: borderRadius.lg,
     paddingVertical: spacing.md,
     paddingHorizontal: spacing.xl,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  recordStartIcon: {
-    fontSize: 24,
   },
   recordStartText: {
     color: colors.surface,
@@ -404,7 +563,9 @@ const styles = StyleSheet.create({
     backgroundColor: colors.text,
   },
   recordIcon: {
-    fontSize: 32,
+    fontSize: 16,
+    color: colors.surface,
+    fontWeight: '700',
   },
   compareLabel: {
     fontSize: fontSize.sm,
@@ -425,6 +586,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: colors.border,
+  },
+  compareButtonActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryLight + '20',
   },
   compareButtonText: {
     fontSize: fontSize.sm,
@@ -451,14 +616,14 @@ const styles = StyleSheet.create({
     fontSize: fontSize.sm,
     fontWeight: '600',
   },
-  retryButton: {
+  retryButtonSmall: {
     flex: 1,
     backgroundColor: colors.surfaceAlt,
     borderRadius: borderRadius.md,
     padding: spacing.sm,
     alignItems: 'center',
   },
-  retryButtonText: {
+  retryButtonSmallText: {
     color: colors.textSecondary,
     fontSize: fontSize.sm,
     fontWeight: '500',
@@ -499,7 +664,23 @@ const styles = StyleSheet.create({
     color: colors.text,
     lineHeight: 22,
   },
-  // Modal
+  errorText: {
+    color: colors.error,
+    fontSize: fontSize.md,
+    textAlign: 'center',
+    marginBottom: spacing.md,
+  },
+  retryButton: {
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  retryButtonText: {
+    color: colors.surface,
+    fontSize: fontSize.md,
+    fontWeight: '600',
+  },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',

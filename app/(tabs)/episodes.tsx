@@ -1,25 +1,28 @@
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, RefreshControl } from 'react-native';
-import { useSQLiteContext } from 'expo-sqlite';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, FlatList, RefreshControl } from 'react-native';
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'expo-router';
-import { FlashList } from '@shopify/flash-list';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
-import { getEpisodes } from '../../src/database/queries';
-import { syncEpisodes } from '../../src/services/syncService';
+import { getEpisodes } from '../../src/services/apiClient';
 import type { EpisodeSummary } from '../../src/types/episode';
 
 export default function EpisodesScreen() {
-  const db = useSQLiteContext();
   const router = useRouter();
   const [episodes, setEpisodes] = useState<EpisodeSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
   const loadEpisodes = useCallback(async () => {
-    const data = await getEpisodes(db);
-    setEpisodes(data);
-    setLoading(false);
-  }, [db]);
+    try {
+      setError('');
+      const data = await getEpisodes(1, 50);
+      setEpisodes(data.episodes);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to load episodes');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     loadEpisodes();
@@ -27,12 +30,7 @@ export default function EpisodesScreen() {
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    try {
-      await syncEpisodes(db);
-      await loadEpisodes();
-    } catch {
-      // silent fail on refresh
-    }
+    await loadEpisodes();
     setRefreshing(false);
   };
 
@@ -75,9 +73,9 @@ export default function EpisodesScreen() {
       </View>
       <View style={styles.episodeMeta}>
         <Text style={styles.metaText}>{formatDate(item.published_at)}</Text>
-        {item.duration_sec && (
+        {item.duration_sec ? (
           <Text style={styles.metaText}>{formatDuration(item.duration_sec)}</Text>
-        )}
+        ) : null}
       </View>
     </TouchableOpacity>
   );
@@ -90,15 +88,26 @@ export default function EpisodesScreen() {
     );
   }
 
+  if (error) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.errorText}>{error}</Text>
+        <TouchableOpacity style={styles.retryButton} onPress={loadEpisodes}>
+          <Text style={styles.retryButtonText}>Retry</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
       {episodes.length === 0 ? (
         <View style={styles.center}>
           <Text style={styles.emptyText}>No episodes yet</Text>
-          <Text style={styles.emptyHint}>Pull down to sync from BBC</Text>
+          <Text style={styles.emptyHint}>Pull down to refresh</Text>
         </View>
       ) : (
-        <FlashList
+        <FlatList
           data={episodes}
           renderItem={renderEpisode}
           keyExtractor={(item) => item.id.toString()}
@@ -121,6 +130,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    padding: spacing.lg,
   },
   list: {
     padding: spacing.md,
@@ -179,5 +189,22 @@ const styles = StyleSheet.create({
   emptyHint: {
     fontSize: fontSize.sm,
     color: colors.textMuted,
+  },
+  errorText: {
+    color: colors.error,
+    fontSize: fontSize.md,
+    textAlign: 'center',
+    marginBottom: spacing.md,
+  },
+  retryButton: {
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  retryButtonText: {
+    color: colors.surface,
+    fontSize: fontSize.md,
+    fontWeight: '600',
   },
 });

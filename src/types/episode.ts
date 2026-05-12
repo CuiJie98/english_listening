@@ -15,8 +15,7 @@ export interface Episode {
 }
 
 export interface TranscriptSegment {
-  start: number;
-  end: number;
+  speaker: string;
   text: string;
 }
 
