@@ -1,4 +1,4 @@
-import type { Episode, EpisodeSummary, VocabCard, VocabWithReview, ReviewState, Attempt } from '../types';
+import type { Episode, EpisodeSummary, VocabCard, VocabWithReview, ReviewState, AttemptWithEpisode } from '../types';
 
 // ── Episodes ──
 
@@ -164,6 +164,14 @@ export async function getReviewState(db: D1Database, cardId: number): Promise<Re
   return db.prepare('SELECT * FROM review_state WHERE card_id = ?').bind(cardId).first<ReviewState>();
 }
 
+export async function getVocabCardById(
+  db: D1Database,
+  id: number,
+  userId: string
+): Promise<VocabCard | null> {
+  return db.prepare('SELECT * FROM vocab_cards WHERE id = ? AND user_id = ?').bind(id, userId).first<VocabCard>();
+}
+
 export async function upsertReviewState(
   db: D1Database,
   cardId: number,
@@ -191,6 +199,23 @@ export async function insertAttempt(
     `INSERT INTO attempts (user_id, episode_id, type, duration_ms) VALUES (?, ?, ?, ?)`
   ).bind(attempt.user_id, attempt.episode_id, attempt.type, attempt.duration_ms ?? null).run();
   return result.meta.last_row_id as number;
+}
+
+export async function getAttempts(
+  db: D1Database,
+  userId: string,
+  limit = 10
+): Promise<AttemptWithEpisode[]> {
+  const safeLimit = Math.max(1, Math.min(50, limit));
+  const { results } = await db.prepare(
+    `SELECT a.*, e.title as episode_title
+     FROM attempts a
+     LEFT JOIN episodes e ON e.id = a.episode_id
+     WHERE a.user_id = ?
+     ORDER BY a.created_at DESC
+     LIMIT ?`
+  ).bind(userId, safeLimit).all<AttemptWithEpisode>();
+  return results ?? [];
 }
 
 // ── Stats ──

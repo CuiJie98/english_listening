@@ -2,10 +2,10 @@ import { Router } from './router';
 import { handleListEpisodes, handleGetEpisode } from './handlers/episodes';
 import { handleStreamAudio } from './handlers/audio';
 import { handleListVocab, handleDueVocab, handleCreateVocab, handleDeleteVocab, handleReviewVocab } from './handlers/vocab';
-import { handleCreateAttempt } from './handlers/attempts';
+import { handleCreateAttempt, handleListAttempts } from './handlers/attempts';
 import { handleGetStats } from './handlers/stats';
 import { fetchFeed } from './services/feedFetcher';
-import { fetchTranscript, fetchAudioUrl } from './services/transcriptExtractor';
+import { fetchTranscript, fetchAudioUrl, fetchTranscriptVerbose } from './services/transcriptExtractor';
 import {
   getEpisode,
   getEpisodeByBbcId,
@@ -37,6 +37,7 @@ router.delete('/api/vocab/:id', (req, params, env) => handleDeleteVocab(req, par
 router.post('/api/vocab/:id/review', (req, params, env) => handleReviewVocab(req, params, env));
 
 // Attempts
+router.get('/api/attempts', (req, params, env) => handleListAttempts(req, params, env));
 router.post('/api/attempts', (req, params, env) => handleCreateAttempt(req, params, env));
 
 // Stats
@@ -44,6 +45,9 @@ router.get('/api/stats', (req, params, env) => handleGetStats(req, params, env))
 
 // Debug: check audio URL extraction for an episode
 router.get('/api/debug/audio/:id', async (_req, params, env) => {
+  const adminError = requireAdmin(_req, env);
+  if (adminError) return adminError;
+
   const id = parseInt(params.id, 10);
   if (isNaN(id)) return Response.json({ error: 'Invalid ID' }, { status: 400 });
 
@@ -76,8 +80,11 @@ router.get('/api/debug/audio/:id', async (_req, params, env) => {
   }
 });
 
-// Debug: check transcript extraction for an episode
+// Debug: check transcript extraction for an episode (verbose)
 router.get('/api/debug/transcript/:id', async (_req, params, env) => {
+  const adminError = requireAdmin(_req, env);
+  if (adminError) return adminError;
+
   const id = parseInt(params.id, 10);
   if (isNaN(id)) return Response.json({ error: 'Invalid ID' }, { status: 400 });
 
@@ -88,9 +95,10 @@ router.get('/api/debug/transcript/:id', async (_req, params, env) => {
   if (!pageUrl) return Response.json({ error: 'No page URL', episode: ep });
 
   try {
-    const result = await fetchTranscript(pageUrl);
+    const { result, diag } = await fetchTranscriptVerbose(pageUrl);
     return Response.json({
       episode: { id: ep.id, bbc_id: ep.bbc_id, title: ep.title },
+      diag,
       extraction: result ? {
         segmentCount: result.segments.length,
         speakers: [...new Set(result.segments.map(s => s.speaker))],
@@ -106,6 +114,9 @@ router.get('/api/debug/transcript/:id', async (_req, params, env) => {
 
 // Reparse: re-extract transcript for an episode without changing fetch_status
 router.get('/api/reparse/:id', async (_req, params, env) => {
+  const adminError = requireAdmin(_req, env);
+  if (adminError) return adminError;
+
   const id = parseInt(params.id, 10);
   if (isNaN(id)) return Response.json({ error: 'Invalid ID' }, { status: 400 });
 
@@ -136,10 +147,28 @@ router.get('/api/reparse/:id', async (_req, params, env) => {
   }
 });
 
+// Clear all transcript data for re-extraction
+router.get('/api/clear-transcripts', async (_req, _params, env) => {
+  const adminError = requireAdmin(_req, env);
+  if (adminError) return adminError;
+
+  const result = await env.DB.prepare(
+    `UPDATE episodes SET transcript = NULL, transcript_segments = NULL, fetch_status = 'pending'`
+  ).run();
+
+  return Response.json({ ok: true, updated: result.meta.changes });
+});
+
 // Batch reparse: re-extract transcripts for all episodes (limit 10 per call)
 router.get('/api/reparse-all', async (_req, _params, env) => {
+  const adminError = requireAdmin(_req, env);
+  if (adminError) return adminError;
+
   const { results } = await env.DB.prepare(
-    `SELECT id, bbc_id, title, page_url FROM episodes WHERE page_url IS NOT NULL AND page_url != '' ORDER BY id`
+    `SELECT id, bbc_id, title, page_url FROM episodes
+     WHERE page_url IS NOT NULL AND page_url != ''
+       AND (fetch_status IS NULL OR fetch_status != 'done' OR transcript_segments IS NULL OR transcript_segments = '')
+     ORDER BY id`
   ).all();
 
   if (!results || results.length === 0) {
@@ -159,6 +188,7 @@ router.get('/api/reparse-all', async (_req, _params, env) => {
       if (result && result.segments.length > 0) {
         const segmentsJson = JSON.stringify(result.segments);
         await updateEpisodeTranscriptById(env.DB, ep.id, result.plain, segmentsJson);
+        await updateEpisodeFetchStatus(env.DB, ep.bbc_id, 'done');
         log.push(`OK: ${ep.bbc_id} (${result.segments.length} segments)`);
         successCount++;
       } else {
@@ -180,6 +210,9 @@ router.get('/api/reparse-all', async (_req, _params, env) => {
 
 // Debug: check raw RSS response
 router.get('/api/debug/rss', async (_req, _params, env) => {
+  const adminError = requireAdmin(_req, env);
+  if (adminError) return adminError;
+
   try {
     const resp = await fetch(env.RSS_FEED_URL, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BBCEnglishBot/1.0)' },
@@ -204,16 +237,33 @@ router.get('/api/debug/rss', async (_req, _params, env) => {
 
 // Manual sync trigger (GET for easy browser access)
 router.get('/api/sync', async (_req, _params, env) => {
+  const adminError = requireAdmin(_req, env);
+  if (adminError) return adminError;
+
   const result = await syncEpisodes(env);
   return Response.json(result);
 });
+
+function requireAdmin(request: Request, env: Env): Response | null {
+  const secret = env.ADMIN_SECRET;
+  if (!secret) {
+    return Response.json({ error: 'Admin routes are disabled' }, { status: 403 });
+  }
+  const url = new URL(request.url);
+  const fromHeader = request.headers.get('X-Admin-Secret');
+  const fromQuery = url.searchParams.get('secret');
+  if (fromHeader !== secret && fromQuery !== secret) {
+    return Response.json({ error: 'Forbidden' }, { status: 403 });
+  }
+  return null;
+}
 
 // CORS headers
 function corsHeaders(): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-User-Id',
+    'Access-Control-Allow-Headers': 'Content-Type, X-User-Id, X-Admin-Secret',
   };
 }
 

@@ -2,36 +2,59 @@ import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, FlatList, 
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'expo-router';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
-import { getEpisodes } from '../../src/services/apiClient';
+import { getEpisodes, getAttempts, type AttemptWithEpisode } from '../../src/services/apiClient';
 import type { EpisodeSummary } from '../../src/types/episode';
+
+const PAGE_SIZE = 20;
 
 export default function EpisodesScreen() {
   const router = useRouter();
   const [episodes, setEpisodes] = useState<EpisodeSummary[]>([]);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [attempts, setAttempts] = useState<AttemptWithEpisode[]>([]);
 
-  const loadEpisodes = useCallback(async () => {
+  const loadEpisodes = useCallback(async (nextPage = 1, append = false) => {
     try {
       setError('');
-      const data = await getEpisodes(1, 50);
-      setEpisodes(data.episodes);
+      const data = await getEpisodes(nextPage, PAGE_SIZE);
+      setEpisodes((current) => append ? [...current, ...data.episodes] : data.episodes);
+      setTotal(data.total);
+      setPage(nextPage);
     } catch (err: any) {
       setError(err?.message || 'Failed to load episodes');
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
+  }, []);
+
+  const loadAttempts = useCallback(async () => {
+    try {
+      const data = await getAttempts(8);
+      setAttempts(data);
+    } catch {}
   }, []);
 
   useEffect(() => {
     loadEpisodes();
-  }, [loadEpisodes]);
+    loadAttempts();
+  }, [loadEpisodes, loadAttempts]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    await loadEpisodes();
+    await Promise.all([loadEpisodes(1, false), loadAttempts()]);
     setRefreshing(false);
+  };
+
+  const handleLoadMore = () => {
+    if (loadingMore || refreshing || episodes.length >= total) return;
+    setLoadingMore(true);
+    loadEpisodes(page + 1, true);
   };
 
   const formatDate = (timestamp: number | null) => {
@@ -49,10 +72,19 @@ export default function EpisodesScreen() {
     return `${m} min`;
   };
 
+  const formatAttemptDuration = (ms: number | null) => {
+    if (!ms) return '0:00';
+    const totalSec = Math.round(ms / 1000);
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    return `${min}:${sec.toString().padStart(2, '0')}`;
+  };
+
   const renderEpisode = ({ item }: { item: EpisodeSummary }) => (
     <TouchableOpacity
       style={styles.episodeCard}
       onPress={() => router.push(`/episode/${item.id}`)}
+      activeOpacity={0.7}
     >
       <View style={styles.episodeHeader}>
         <Text style={styles.episodeTitle} numberOfLines={2}>
@@ -76,6 +108,14 @@ export default function EpisodesScreen() {
         {item.duration_sec ? (
           <Text style={styles.metaText}>{formatDuration(item.duration_sec)}</Text>
         ) : null}
+        <TouchableOpacity
+          style={styles.detailButton}
+          onPress={() => router.push(`/episode/${item.id}`)}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <Text style={styles.detailButtonText}>i</Text>
+        </TouchableOpacity>
+        <Text style={styles.chevron}>›</Text>
       </View>
     </TouchableOpacity>
   );
@@ -92,7 +132,7 @@ export default function EpisodesScreen() {
     return (
       <View style={styles.center}>
         <Text style={styles.errorText}>{error}</Text>
-        <TouchableOpacity style={styles.retryButton} onPress={loadEpisodes}>
+        <TouchableOpacity style={styles.retryButton} onPress={() => loadEpisodes()}>
           <Text style={styles.retryButtonText}>Retry</Text>
         </TouchableOpacity>
       </View>
@@ -112,6 +152,40 @@ export default function EpisodesScreen() {
           renderItem={renderEpisode}
           keyExtractor={(item) => item.id.toString()}
           contentContainerStyle={styles.list}
+          onEndReached={handleLoadMore}
+          onEndReachedThreshold={0.5}
+          ListHeaderComponent={
+            attempts.length > 0 ? (
+              <View style={styles.historySection}>
+                <Text style={styles.historyTitle}>Recent Practice</Text>
+                {attempts.map((item) => (
+                  <TouchableOpacity
+                    key={item.id}
+                    style={styles.historyCard}
+                    onPress={() => router.push(`/episode/${item.episode_id}`)}
+                  >
+                    <View style={styles.historyMetaRow}>
+                      <Text style={styles.historyType}>
+                        {item.type === 'shadow' ? 'Shadowing' : 'Listening'}
+                      </Text>
+                      <Text style={styles.historyDate}>{formatDate(item.created_at)}</Text>
+                    </View>
+                    <Text style={styles.historyEpisode} numberOfLines={1}>
+                      {item.episode_title || 'Episode'}
+                    </Text>
+                    <Text style={styles.historyDuration}>{formatAttemptDuration(item.duration_ms)}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : null
+          }
+          ListFooterComponent={
+            loadingMore ? (
+              <View style={styles.listFooter}>
+                <ActivityIndicator size="small" color={colors.primary} />
+              </View>
+            ) : null
+          }
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
           }
@@ -134,6 +208,10 @@ const styles = StyleSheet.create({
   },
   list: {
     padding: spacing.md,
+  },
+  listFooter: {
+    paddingVertical: spacing.md,
+    alignItems: 'center',
   },
   episodeCard: {
     backgroundColor: colors.surface,
@@ -171,15 +249,39 @@ const styles = StyleSheet.create({
   badgeText: {
     fontSize: fontSize.xs,
     fontWeight: '500',
+    color: colors.text,
   },
   episodeMeta: {
     flexDirection: 'row',
     gap: spacing.md,
     marginTop: spacing.sm,
+    alignItems: 'center',
   },
   metaText: {
     fontSize: fontSize.xs,
     color: colors.textSecondary,
+  },
+  chevron: {
+    fontSize: 20,
+    color: colors.textMuted,
+    marginLeft: spacing.xs,
+  },
+  detailButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.surfaceAlt,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 'auto',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  detailButtonText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.textSecondary,
+    fontStyle: 'italic',
   },
   emptyText: {
     fontSize: fontSize.lg,
@@ -206,5 +308,48 @@ const styles = StyleSheet.create({
     color: colors.surface,
     fontSize: fontSize.md,
     fontWeight: '600',
+  },
+  historySection: {
+    marginTop: spacing.lg,
+    paddingTop: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  historyTitle: {
+    fontSize: fontSize.lg,
+    fontWeight: '600',
+    color: colors.text,
+    marginBottom: spacing.sm,
+  },
+  historyCard: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  historyMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: spacing.xs,
+  },
+  historyType: {
+    fontSize: fontSize.xs,
+    color: colors.primary,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
+  historyDate: {
+    fontSize: fontSize.xs,
+    color: colors.textMuted,
+  },
+  historyEpisode: {
+    fontSize: fontSize.md,
+    color: colors.text,
+    fontWeight: '600',
+    marginBottom: spacing.xs,
+  },
+  historyDuration: {
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
   },
 });

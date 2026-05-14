@@ -1,20 +1,19 @@
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-native';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { colors, spacing, fontSize, borderRadius } from '../src/constants/theme';
 import { SPEED_OPTIONS } from '../src/constants/config';
+import { getPlaybackSpeed, setPlaybackSpeed } from '../src/services/storage';
 
 export default function SettingsScreen() {
-  const [speed, setSpeed] = useState(() => {
-    if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem('playback_speed');
-      return stored ? parseFloat(stored) : 1.0;
-    }
-    return 1.0;
-  });
+  const [speed, setSpeed] = useState(1.0);
+
+  useEffect(() => {
+    getPlaybackSpeed().then(setSpeed).catch(() => setSpeed(1.0));
+  }, []);
 
   const handleSpeedChange = (s: number) => {
     setSpeed(s);
-    if (typeof window !== 'undefined') localStorage.setItem('playback_speed', s.toString());
+    setPlaybackSpeed(s).catch(() => {});
   };
 
   return (

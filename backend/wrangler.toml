@@ -13,3 +13,4 @@ crons = ["0 */6 * * *"]
 [vars]
 RSS_FEED_URL = "https://feeds.bbci.co.uk/learningenglish/english/features/6-minute-english_2026/rss"
 BBC_BASE_URL = "https://www.bbc.co.uk/learningenglish/english/features/6-minute-english"
+ADMIN_SECRET = "debug2026"

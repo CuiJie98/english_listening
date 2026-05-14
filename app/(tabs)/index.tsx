@@ -1,5 +1,5 @@
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
-import { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, RefreshControl, ScrollView } from 'react-native';
+import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'expo-router';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
 import { getStats, getEpisodes, type Stats } from '../../src/services/apiClient';
@@ -10,25 +10,32 @@ export default function HomeScreen() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [latestEpisode, setLatestEpisode] = useState<EpisodeSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
 
-  const loadData = () => {
-    setLoading(true);
-    setError('');
-    Promise.all([
-      getStats(),
-      getEpisodes(1, 1),
-    ]).then(([s, epData]) => {
+  const loadData = useCallback(async () => {
+    try {
+      setError('');
+      const [s, epData] = await Promise.all([
+        getStats(),
+        getEpisodes(1, 1),
+      ]);
       setStats(s);
       setLatestEpisode(epData.episodes.length > 0 ? epData.episodes[0] : null);
-      setLoading(false);
-    }).catch((err) => {
+    } catch (err: any) {
       setError(err?.message || 'Failed to load data');
+    } finally {
       setLoading(false);
-    });
-  };
+    }
+  }, []);
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => { loadData(); }, [loadData]);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    await loadData();
+    setRefreshing(false);
+  };
 
   if (loading) {
     return (
@@ -50,10 +57,18 @@ export default function HomeScreen() {
   }
 
   return (
-    <View style={styles.container}>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.content}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
+    >
       <View style={styles.header}>
         <Text style={styles.title}>6 Min English</Text>
-        <TouchableOpacity onPress={() => router.push('/settings')}>
+        <TouchableOpacity
+          style={styles.settingsButton}
+          onPress={() => router.push('/settings')}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+        >
           <Text style={styles.settingsIcon}>&#9881;</Text>
         </TouchableOpacity>
       </View>
@@ -61,20 +76,20 @@ export default function HomeScreen() {
 
       <View style={styles.statsRow}>
         <View style={styles.statCard}>
-          <Text style={styles.statNumber}>{stats?.streak ?? 0}</Text>
+          <Text style={styles.statNumber}>{stats ? stats.streak : '--'}</Text>
           <Text style={styles.statLabel}>Day Streak</Text>
         </View>
         <View style={styles.statCard}>
-          <Text style={styles.statNumber}>{stats?.totalEpisodes ?? 0}</Text>
+          <Text style={styles.statNumber}>{stats ? stats.totalEpisodes : '--'}</Text>
           <Text style={styles.statLabel}>Episodes</Text>
         </View>
         <View style={styles.statCard}>
-          <Text style={styles.statNumber}>{stats?.dueCount ?? 0}</Text>
+          <Text style={styles.statNumber}>{stats ? stats.dueCount : '--'}</Text>
           <Text style={styles.statLabel}>Due Review</Text>
         </View>
       </View>
 
-      {latestEpisode && (
+      {latestEpisode ? (
         <TouchableOpacity
           style={styles.latestCard}
           onPress={() => router.push(`/episode/${latestEpisode.id}`)}
@@ -85,6 +100,11 @@ export default function HomeScreen() {
           </Text>
           <Text style={styles.playHint}>Tap to listen</Text>
         </TouchableOpacity>
+      ) : (
+        <View style={styles.latestCardEmpty}>
+          <Text style={styles.latestCardEmptyText}>No episodes available yet</Text>
+          <Text style={styles.latestCardEmptyHint}>Pull down to refresh</Text>
+        </View>
       )}
 
       {(stats?.dueCount ?? 0) > 0 && (
@@ -95,7 +115,7 @@ export default function HomeScreen() {
           <Text style={styles.reviewButtonText}>Review {stats!.dueCount} Cards</Text>
         </TouchableOpacity>
       )}
-    </View>
+    </ScrollView>
   );
 }
 
@@ -103,13 +123,16 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  content: {
     padding: spacing.lg,
-    paddingTop: spacing.xxl,
+    paddingBottom: spacing.xxl,
   },
   center: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    padding: spacing.lg,
   },
   header: {
     flexDirection: 'row',
@@ -120,6 +143,12 @@ const styles = StyleSheet.create({
     fontSize: fontSize.xxl,
     fontWeight: '700',
     color: colors.text,
+  },
+  settingsButton: {
+    width: 44,
+    height: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   settingsIcon: { fontSize: 24 },
   subtitle: {
@@ -169,6 +198,22 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
   playHint: { color: colors.primaryLight, fontSize: fontSize.sm },
+  latestCardEmpty: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.lg,
+    marginBottom: spacing.lg,
+    alignItems: 'center',
+  },
+  latestCardEmptyText: {
+    color: colors.textSecondary,
+    fontSize: fontSize.md,
+    marginBottom: spacing.xs,
+  },
+  latestCardEmptyHint: {
+    color: colors.textMuted,
+    fontSize: fontSize.sm,
+  },
   reviewButton: {
     backgroundColor: colors.warning,
     borderRadius: borderRadius.md,
@@ -185,7 +230,6 @@ const styles = StyleSheet.create({
     fontSize: fontSize.md,
     textAlign: 'center',
     marginBottom: spacing.md,
-    paddingHorizontal: spacing.lg,
   },
   retryButton: {
     backgroundColor: colors.primary,

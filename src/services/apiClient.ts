@@ -1,20 +1,11 @@
 import type { Episode, EpisodeSummary } from '../types/episode';
 import { API_BASE } from '../constants/config';
+import { getOrCreateUserId } from './storage';
 
-function getUserId(): string {
-  if (typeof window === 'undefined') return 'anonymous';
-  let id = localStorage.getItem('user_id');
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem('user_id', id);
-  }
-  return id;
-}
-
-function headers(): Record<string, string> {
+async function headers(): Promise<Record<string, string>> {
   return {
     'Content-Type': 'application/json',
-    'X-User-Id': getUserId(),
+    'X-User-Id': await getOrCreateUserId(),
   };
 }
 
@@ -23,7 +14,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   try {
     resp = await fetch(`${API_BASE}${path}`, {
       ...options,
-      headers: { ...headers(), ...options?.headers },
+      headers: { ...(await headers()), ...options?.headers },
     });
   } catch {
     throw new Error('Network error. Please check your connection.');
@@ -124,6 +115,21 @@ export async function insertAttempt(attempt: {
     body: JSON.stringify(attempt),
   });
   return data.id;
+}
+
+export interface AttemptWithEpisode {
+  id: number;
+  user_id: string;
+  episode_id: number;
+  episode_title: string | null;
+  type: 'listen' | 'shadow';
+  duration_ms: number | null;
+  created_at: number;
+}
+
+export async function getAttempts(limit = 10): Promise<AttemptWithEpisode[]> {
+  const data = await apiFetch<{ attempts: AttemptWithEpisode[] }>(`/api/attempts?limit=${limit}`);
+  return data.attempts;
 }
 
 // ── Stats ──

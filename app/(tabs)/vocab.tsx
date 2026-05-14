@@ -181,7 +181,7 @@ export default function VocabScreen() {
           <Text style={styles.reviewBannerText}>
             {dueCards.length} cards due for review
           </Text>
-          <Text style={styles.reviewBannerAction}>Start</Text>
+          <Text style={styles.reviewBannerAction}>Start ›</Text>
         </TouchableOpacity>
       )}
 
@@ -371,8 +371,10 @@ const styles = StyleSheet.create({
   rateButton: {
     flex: 1,
     borderRadius: borderRadius.md,
-    padding: spacing.sm,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.sm,
     alignItems: 'center',
+    minHeight: 44,
   },
   rateButtonDisabled: {
     opacity: 0.5,

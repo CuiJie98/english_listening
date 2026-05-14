@@ -4,6 +4,7 @@ import {
   getDueVocabCards,
   insertVocabCard,
   deleteVocabCard,
+  getVocabCardById,
   getReviewState,
   upsertReviewState,
 } from '../db/queries';
@@ -75,8 +76,13 @@ export async function handleReviewVocab(request: Request, params: Record<string,
 
   const body = await request.json<{ quality: number }>();
   const quality = body.quality;
-  if (quality < 0 || quality > 5) {
+  if (typeof quality !== 'number' || !Number.isFinite(quality) || quality < 0 || quality > 5) {
     return Response.json({ error: 'quality must be 0-5' }, { status: 400 });
+  }
+
+  const card = await getVocabCardById(env.DB, cardId, userId);
+  if (!card) {
+    return Response.json({ error: 'Card not found' }, { status: 404 });
   }
 
   const existing = await getReviewState(env.DB, cardId);

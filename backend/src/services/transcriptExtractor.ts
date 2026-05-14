@@ -67,108 +67,136 @@ function extractAudioUrl(html: string): string | null {
 }
 
 function extractTranscript(html: string): TranscriptResult | null {
-  // Strategy: find <h2>Transcript</h2> (or <h3>), then collect all <p> tags after it
-  // within the same widget container, stopping at the next heading or end of widget.
-
-  const headingMatch = /<h[23][^>]*>[^<]*transcript[^<]*<\/h[23]>/i.exec(html);
-  if (!headingMatch) {
-    // Fallback: try to find any transcript-related div
-    return extractTranscriptFallback(html);
+  // Strategy A: Find transcript heading (h2/h3 or p+strong), extract region after it
+  const regionA = findTranscriptRegion(html);
+  if (regionA) {
+    const segments = splitBySpeakers(regionA);
+    if (segments.length >= 4) return buildResult(segments);
   }
 
-  // Find the start position: right after the heading
-  const startPos = headingMatch.index + headingMatch[0].length;
-
-  // Find the end of the widget container (next <div class="widget or </div> at widget level)
-  // We look for the next <h2> or <h3> at the same level, or end of the parent widget div
-  const afterHeading = html.substring(startPos);
-
-  // Collect all <p> tags until we hit another heading or a closing widget div
-  const segments = parseParagraphsUntilHeading(afterHeading);
-
-  if (segments.length === 0) {
-    return extractTranscriptFallback(html);
+  // Strategy B: Find <div class="transcript">
+  const divMatch = /<div[^>]*class="[^"]*transcript[^"]*"[^>]*>([\s\S]*?)<\/div>/i.exec(html);
+  if (divMatch) {
+    const segments = splitBySpeakers(divMatch[1]);
+    if (segments.length >= 4) return buildResult(segments);
   }
 
-  const plain = segments.map((s) => `${s.speaker}: ${s.text}`).join('\n');
-  return { plain, segments };
+  // Strategy C: Full-page scan — collect all <p> tags with speaker labels
+  const segments = scanPageForSpeakers(html);
+  if (segments.length >= 4) return buildResult(segments);
+
+  return null;
 }
 
-function parseParagraphsUntilHeading(html: string): TranscriptSegment[] {
-  const segments: TranscriptSegment[] = [];
-  const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
-  const headingRegex = /<h[1-6][^>]*>/gi;
-  let match: RegExpExecArray | null;
-  let headingMatch: RegExpExecArray | null;
+// Strategy A helper: find the transcript region after a heading
+function findTranscriptRegion(html: string): string | null {
+  // Old format: <h2>Transcript</h2>
+  let match = /<h[23][^>]*>[^<]*transcript[^<]*<\/h[23]>/i.exec(html);
+  if (match) {
+    const start = match.index + match[0].length;
+    const rest = html.substring(start);
+    // Stop at next heading or widget div
+    const endMatch = /(?:<h[1-6][^>]*>|<div[^>]*class="[^"]*widget[^"]*")/i.exec(rest);
+    return endMatch ? rest.substring(0, endMatch.index) : rest.substring(0, 50000);
+  }
 
-  // Find all <p> tags and <h*> tags, in order
-  const allTags: Array<{ type: 'p' | 'h'; index: number; content?: string; full?: string }> = [];
+  // New format: <p><strong>TRANSCRIPT</strong></p>
+  match = /<p[^>]*>\s*<(?:strong|b)[^>]*>[^<]*transcript[^<]*<\/(?:strong|b)>\s*<\/p>/i.exec(html);
+  if (match) {
+    const start = match.index + match[0].length;
+    const rest = html.substring(start);
+    // Stop at next heading or widget div
+    const endMatch = /(?:<h[1-6][^>]*>|<div[^>]*class="[^"]*widget[^"]*")/i.exec(rest);
+    return endMatch ? rest.substring(0, endMatch.index) : rest.substring(0, 50000);
+  }
+
+  return null;
+}
+
+// Strategy C helper: scan all <p> tags on the page for speaker-labeled content
+function scanPageForSpeakers(html: string): TranscriptSegment[] {
+  const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
+  let match: RegExpExecArray | null;
+  const allSpeakerContent: string[] = [];
 
   while ((match = pRegex.exec(html)) !== null) {
-    allTags.push({ type: 'p', index: match.index, content: match[1], full: match[0] });
+    const content = match[1];
+    // Only keep <p> tags that contain speaker format: <strong>Name</strong><br /> or <strong>Name<br /></strong>
+    if (/<(?:strong|b)[^>]*>[^<]+<br\s*\/?>\s*<\/(?:strong|b)>/i.test(content) ||
+        /<(?:strong|b)[^>]*>[^<]+<\/(?:strong|b)>\s*<br\s*\/?>/i.test(content) ||
+        /^\s*<(?:strong|b)[^>]*>[^<]+<br\s*\/?>\s*<\/(?:strong|b)>/i.test(content) ||
+        /^\s*<(?:strong|b)[^>]*>[^<]+<\/(?:strong|b)>\s*<br\s*\/?>/i.test(content)) {
+      allSpeakerContent.push(content);
+    }
   }
 
-  while ((headingMatch = headingRegex.exec(html)) !== null) {
-    allTags.push({ type: 'h', index: headingMatch.index, full: headingMatch[0] });
+  // Join all speaker-labeled content and split by speakers
+  return splitBySpeakers(allSpeakerContent.join('\n'));
+}
+
+// Core: split HTML content by speaker label boundaries
+// BBC HTML format: <strong>Neil</strong><br />Hello. This is 6 Minute English...
+// The <br> comes AFTER the speaker name, separating it from dialogue.
+// Bold words in dialogue appear mid-sentence without trailing <br>:
+//   ...the <strong>worst-case scenario</strong> is...
+function splitBySpeakers(html: string): TranscriptSegment[] {
+  // Match speaker labels in two BBC formats:
+  // 1. <strong>Neil</strong><br /> — <br> outside <strong>
+  // 2. <strong>Georgie<br /></strong> — <br> inside <strong>
+  // At least one <br> must be present (to exclude bold words in dialogue).
+  const speakerRegex = /<(?:strong|b)[^>]*>([^<]+)<br\s*\/?>\s*<\/(?:strong|b)>|<(?:strong|b)[^>]*>([^<]+)<\/(?:strong|b)>\s*<br\s*\/?>/gi;
+  const speakers: Array<{ name: string; tagStart: number; afterTag: number }> = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = speakerRegex.exec(html)) !== null) {
+    const name = decodeEntities(match[1] || match[2]).trim();
+    // Skip long text (likely not a speaker name) and common non-speaker labels
+    if (name.length > 30 || /^(?:transcript|note|notes|quiz|worksheet|download)$/i.test(name)) continue;
+    speakers.push({
+      name,
+      tagStart: match.index,
+      afterTag: match.index + match[0].length,
+    });
   }
 
-  // Sort by position
-  allTags.sort((a, b) => a.index - b.index);
+  // Also check if content starts with a speaker (no preceding <br>)
+  const startMatch = /^\s*<(?:strong|b)[^>]*>([^<]+)<br\s*\/?>\s*<\/(?:strong|b)>|^\s*<(?:strong|b)[^>]*>([^<]+)<\/(?:strong|b)>\s*<br\s*\/?>/i.exec(html);
+  if (startMatch) {
+    const name = decodeEntities(startMatch[1] || startMatch[2]).trim();
+    if (name.length <= 30 && !/^(?:transcript|note|notes|quiz|worksheet|download)$/i.test(name)) {
+      // Only add if not already captured at index 0
+      if (speakers.length === 0 || speakers[0].tagStart !== 0) {
+        speakers.unshift({
+          name,
+          tagStart: 0,
+          afterTag: startMatch[0].length,
+        });
+      }
+    }
+  }
 
-  // Process <p> tags until we hit a heading
-  for (const tag of allTags) {
-    if (tag.type === 'h') break; // Stop at next heading
-    if (tag.type === 'p' && tag.content) {
-      const segment = parseParagraphContent(tag.content);
-      if (segment) segments.push(segment);
+  if (speakers.length === 0) return [];
+
+  // Deduplicate speakers at the same position
+  const unique = speakers.filter((s, i) => i === 0 || s.tagStart !== speakers[i - 1].tagStart);
+
+  const segments: TranscriptSegment[] = [];
+
+  for (let i = 0; i < unique.length; i++) {
+    const speaker = unique[i];
+    const contentStart = speaker.afterTag;
+    const contentEnd = i + 1 < unique.length ? unique[i + 1].tagStart : html.length;
+    const rawContent = html.substring(contentStart, contentEnd);
+    const text = cleanHtml(rawContent).trim();
+    if (text.length > 0) {
+      segments.push({ speaker: speaker.name, text });
     }
   }
 
   return segments;
 }
 
-function parseParagraphContent(html: string): TranscriptSegment | null {
-  // BBC format: <strong>Speaker Name</strong>&nbsp;&nbsp;Dialogue text
-  // Or sometimes: <b>Speaker Name</b>&nbsp;&nbsp;Dialogue text
-
-  // Try to extract speaker name from <strong> or <b> at the start
-  const speakerMatch = /^<(?:strong|b)[^>]*>([^<]+)<\/(?:strong|b)>(?:\s|&nbsp;)*(?:<br\s*\/?>)?/i.exec(html);
-
-  if (speakerMatch) {
-    const speaker = decodeEntities(speakerMatch[1]).trim();
-    const remaining = html.substring(speakerMatch[0].length);
-    const text = cleanHtml(remaining).trim();
-    if (text.length > 0) {
-      return { speaker, text };
-    }
-  }
-
-  // No speaker label — skip non-dialogue content
-  return null;
-}
-
-function extractTranscriptFallback(html: string): TranscriptResult | null {
-  // Look for a div with "transcript" in its class and extract <p> tags from it
-  const divMatch = /<div[^>]*class="[^"]*transcript[^"]*"[^>]*>([\s\S]*?)<\/div>/i.exec(html);
-  if (divMatch) {
-    return parseHtmlToTranscript(divMatch[1]);
-  }
-
-  return null;
-}
-
-function parseHtmlToTranscript(html: string): TranscriptResult | null {
-  const segments: TranscriptSegment[] = [];
-  const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
-  let match: RegExpExecArray | null;
-
-  while ((match = pRegex.exec(html)) !== null) {
-    const segment = parseParagraphContent(match[1]);
-    if (segment) segments.push(segment);
-  }
-
-  if (segments.length === 0) return null;
-
+function buildResult(segments: TranscriptSegment[]): TranscriptResult {
   const plain = segments.map((s) => `${s.speaker}: ${s.text}`).join('\n');
   return { plain, segments };
 }
@@ -184,6 +212,18 @@ function cleanHtml(html: string): string {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
+    .replace(/&rsquo;/g, '’')
+    .replace(/&lsquo;/g, '‘')
+    .replace(/&rdquo;/g, '”')
+    .replace(/&ldquo;/g, '“')
+    .replace(/&mdash;/g, '—')
+    .replace(/&ndash;/g, '–')
+    .replace(/&hellip;/g, '…')
+    .replace(/&pound;/g, '£')
+    .replace(/&#8217;/g, '’')
+    .replace(/&#8216;/g, '‘')
+    .replace(/&#8220;/g, '“')
+    .replace(/&#8221;/g, '”')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/ {2,}/g, ' ')
     .trim();
@@ -197,4 +237,94 @@ function decodeEntities(text: string): string {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'");
+}
+
+export interface VerboseDiag {
+  httpStatus: number | null;
+  htmlLength: number;
+  headingFound: boolean;
+  headingText: string | null;
+  headingIndex: number;
+  fallbackDivFound: boolean;
+  fallbackSegments: number;
+  strategy: string | null;
+  segmentCount: number;
+  speakers: string[];
+}
+
+export async function fetchTranscriptVerbose(pageUrl: string): Promise<{ result: TranscriptResult | null; diag: VerboseDiag }> {
+  const diag: VerboseDiag = {
+    httpStatus: null,
+    htmlLength: 0,
+    headingFound: false,
+    headingText: null,
+    headingIndex: -1,
+    fallbackDivFound: false,
+    fallbackSegments: 0,
+    strategy: null,
+    segmentCount: 0,
+    speakers: [],
+  };
+
+  try {
+    const response = await fetch(pageUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BBCEnglishBot/1.0)' },
+      redirect: 'follow',
+    });
+
+    diag.httpStatus = response.status;
+    if (!response.ok) return { result: null, diag };
+
+    const html = await response.text();
+    diag.htmlLength = html.length;
+
+    // Check heading
+    let headingMatch = /<h[23][^>]*>[^<]*transcript[^<]*<\/h[23]>/i.exec(html);
+    if (!headingMatch) {
+      headingMatch = /<p[^>]*>\s*<(?:strong|b)[^>]*>[^<]*transcript[^<]*<\/(?:strong|b)>\s*<\/p>/i.exec(html);
+    }
+    if (headingMatch) {
+      diag.headingFound = true;
+      diag.headingText = headingMatch[0].substring(0, 200);
+      diag.headingIndex = headingMatch.index;
+    }
+
+    // Check fallback div
+    const divMatch = /<div[^>]*class="[^"]*transcript[^"]*"[^>]*>([\s\S]*?)<\/div>/i.exec(html);
+    if (divMatch) {
+      diag.fallbackDivFound = true;
+      diag.fallbackSegments = splitBySpeakers(divMatch[1]).length;
+    }
+
+    // Run extraction and determine which strategy succeeded
+    const regionA = findTranscriptRegion(html);
+    if (regionA) {
+      const segs = splitBySpeakers(regionA);
+      if (segs.length >= 4) {
+        diag.strategy = 'A: heading region';
+      }
+    }
+    if (!diag.strategy && divMatch) {
+      const segs = splitBySpeakers(divMatch[1]);
+      if (segs.length >= 4) {
+        diag.strategy = 'B: transcript div';
+      }
+    }
+    if (!diag.strategy) {
+      const segs = scanPageForSpeakers(html);
+      if (segs.length >= 4) {
+        diag.strategy = 'C: full-page scan';
+      }
+    }
+
+    const result = extractTranscript(html);
+    if (result) {
+      diag.segmentCount = result.segments.length;
+      diag.speakers = [...new Set(result.segments.map(s => s.speaker))];
+    }
+
+    return { result, diag };
+  } catch (err: any) {
+    return { result: null, diag };
+  }
 }

@@ -2,6 +2,7 @@ export interface Env {
   DB: D1Database;
   RSS_FEED_URL: string;
   BBC_BASE_URL: string;
+  ADMIN_SECRET?: string;
 }
 
 export interface Episode {
@@ -67,6 +68,10 @@ export interface Attempt {
   score: number | null;
   duration_ms: number | null;
   created_at: number;
+}
+
+export interface AttemptWithEpisode extends Attempt {
+  episode_title: string | null;
 }
 
 export interface FeedItem {

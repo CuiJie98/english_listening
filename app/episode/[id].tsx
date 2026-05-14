@@ -1,22 +1,72 @@
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Modal, TextInput, Alert } from 'react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useState, useCallback } from 'react';
+import { useLocalSearchParams } from 'expo-router';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import {
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioPlayer,
+  useAudioPlayerStatus,
+  useAudioRecorder,
+  useAudioRecorderState,
+} from 'expo-audio';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
-import { getEpisode, insertVocabCard } from '../../src/services/apiClient';
+import { SPEED_OPTIONS } from '../../src/constants/config';
+import { getEpisode, insertVocabCard, getAudioUrl, insertAttempt } from '../../src/services/apiClient';
+import { getPlaybackSpeed, setPlaybackSpeed } from '../../src/services/storage';
 import type { Episode } from '../../src/types/episode';
+
+type Mode = 'listen' | 'record' | 'compare';
+type ActivePlayer = 'original' | 'recording';
 
 export default function EpisodeDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const router = useRouter();
   const [episode, setEpisode] = useState<Episode | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // Vocab modal
   const [saveModalVisible, setSaveModalVisible] = useState(false);
   const [selectedWord, setSelectedWord] = useState('');
   const [selectedContext, setSelectedContext] = useState('');
   const [definition, setDefinition] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // Player state
+  const [mode, setMode] = useState<Mode>('listen');
+  const [showTranscript, setShowTranscript] = useState(true);
+  const [saved, setSaved] = useState(false);
+  const [recordStartTime, setRecordStartTime] = useState(0);
+  const [recordingUri, setRecordingUri] = useState<string | null>(null);
+  const [activePlayer, setActivePlayer] = useState<ActivePlayer>('original');
+  const [playbackRate, setPlaybackRateState] = useState(1.0);
+  const [progressBarWidth, setProgressBarWidth] = useState(1);
+  const listenSavedForEpisode = useRef<number | null>(null);
+
+  // Audio
+  const originalPlayer = useAudioPlayer(
+    episode ? { uri: getAudioUrl(episode.bbc_id) } : null,
+    { updateInterval: 250 }
+  );
+  const recordingPlayer = useAudioPlayer(
+    recordingUri ? { uri: recordingUri } : null,
+    { updateInterval: 250 }
+  );
+  const originalStatus = useAudioPlayerStatus(originalPlayer);
+  const recordingStatus = useAudioPlayerStatus(recordingPlayer);
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recorderState = useAudioRecorderState(recorder, 250);
+
+  const activeStatus = activePlayer === 'recording' ? recordingStatus : originalStatus;
+  const currentTime = activeStatus.currentTime || 0;
+  const duration = activeStatus.duration || 0;
+  const isPlaying = activeStatus.playing;
+
+  const setPlaybackRate = useCallback((rate: number) => {
+    setPlaybackRateState(rate);
+    originalPlayer.setPlaybackRate(rate);
+    recordingPlayer.setPlaybackRate(rate);
+  }, [originalPlayer, recordingPlayer]);
 
   const loadEpisode = useCallback(async () => {
     if (!id) return;
@@ -36,12 +86,146 @@ export default function EpisodeDetailScreen() {
     }
   }, [id]);
 
-  useEffect(() => {
-    loadEpisode();
-  }, [loadEpisode]);
+  useEffect(() => { loadEpisode(); }, [loadEpisode]);
 
-  const handleWordLongPress = (word: string, context: string) => {
-    setSelectedWord(word);
+  useEffect(() => {
+    getPlaybackSpeed()
+      .then((rate) => setPlaybackRate(rate))
+      .catch(() => setPlaybackRate(1.0));
+  }, [setPlaybackRate]);
+
+  useEffect(() => {
+    if (!episode || activePlayer !== 'original' || !originalStatus.didJustFinish) return;
+    if (listenSavedForEpisode.current === episode.id) return;
+    listenSavedForEpisode.current = episode.id;
+    insertAttempt({
+      episode_id: episode.id,
+      type: 'listen',
+      duration_ms: Math.round((originalStatus.duration || 0) * 1000),
+    }).catch(() => {});
+  }, [activePlayer, episode, originalStatus.didJustFinish, originalStatus.duration]);
+
+  const formatTime = (seconds: number) => {
+    const totalSec = Math.floor(seconds);
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    return `${min}:${sec.toString().padStart(2, '0')}`;
+  };
+
+  const getActivePlayer = () => activePlayer === 'recording' ? recordingPlayer : originalPlayer;
+
+  const handlePlayPause = () => {
+    const player = getActivePlayer();
+    if (activeStatus.playing) {
+      player.pause();
+    } else {
+      player.play();
+    }
+  };
+
+  const handleSeek = (fraction: number) => {
+    if (!duration) return;
+    const clamped = Math.max(0, Math.min(1, fraction));
+    getActivePlayer().seekTo(clamped * duration).catch(() => {});
+  };
+
+  const handleSpeedCycle = () => {
+    const idx = SPEED_OPTIONS.indexOf(playbackRate);
+    const next = SPEED_OPTIONS[(idx + 1) % SPEED_OPTIONS.length];
+    setPlaybackRate(next);
+    setPlaybackSpeed(next).catch(() => {});
+  };
+
+  const handleSkip = (seconds: number) => {
+    if (!duration) return;
+    const target = Math.max(0, Math.min(duration, currentTime + seconds));
+    getActivePlayer().seekTo(target).catch(() => {});
+  };
+
+  const switchToOriginal = () => {
+    recordingPlayer.pause();
+    originalPlayer.setPlaybackRate(playbackRate);
+    setActivePlayer('original');
+  };
+
+  const switchToRecording = () => {
+    originalPlayer.pause();
+    if (!recordingUri) return;
+    recordingPlayer.setPlaybackRate(playbackRate);
+    setActivePlayer('recording');
+  };
+
+  const handleStartRecording = async () => {
+    const { granted } = await requestRecordingPermissionsAsync();
+    if (!granted) {
+      Alert.alert('Permission', 'Microphone permission is required for recording.');
+      return;
+    }
+    try {
+      originalPlayer.pause();
+      recordingPlayer.pause();
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      await recorder.prepareToRecordAsync();
+      recorder.record();
+      setActivePlayer('original');
+      setMode('record');
+      setSaved(false);
+      setRecordingUri(null);
+      setRecordStartTime(Date.now());
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Failed to start recording');
+    }
+  };
+
+  const handleStopRecording = async () => {
+    try {
+      await recorder.stop();
+      await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+      setRecordingUri(recorder.uri);
+      setMode('compare');
+      switchToOriginal();
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Failed to stop recording');
+    }
+  };
+
+  const handlePlayRecording = () => {
+    if (!recordingUri) return;
+    switchToRecording();
+    recordingPlayer.play();
+  };
+
+  const handlePlayOriginal = () => {
+    switchToOriginal();
+    originalPlayer.play();
+  };
+
+  const handleSaveAttempt = async () => {
+    if (!episode) return;
+    try {
+      await insertAttempt({
+        episode_id: episode.id,
+        type: 'shadow',
+        duration_ms: Date.now() - recordStartTime,
+      });
+      setSaved(true);
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Failed to save attempt');
+    }
+  };
+
+  const handleReset = () => {
+    recordingPlayer.pause();
+    originalPlayer.pause();
+    switchToOriginal();
+    originalPlayer.seekTo(0).catch(() => {});
+    setMode('listen');
+    setSaved(false);
+  };
+
+  // Vocab
+  const handleWordLongPress = (context: string) => {
+    setSelectedWord('');
     setSelectedContext(context);
     setDefinition('');
     setSaveModalVisible(true);
@@ -94,20 +278,116 @@ export default function EpisodeDetailScreen() {
     });
   };
 
+  const progress = duration > 0 ? currentTime / duration : 0;
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.title}>{episode.title}</Text>
       <Text style={styles.date}>{formatDate(episode.published_at)}</Text>
 
-      <View style={styles.actionRow}>
+      {/* Player */}
+      <View
+        style={styles.progressBar}
+        onLayout={(e) => setProgressBarWidth(e.nativeEvent.layout.width)}
+      >
+        <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
         <TouchableOpacity
-          style={styles.playButton}
-          onPress={() => router.push(`/player/${episode.id}`)}
-        >
-          <Text style={styles.playButtonText}>Play & Practice</Text>
+          style={styles.progressTouch}
+          onPress={(e) => handleSeek(e.nativeEvent.locationX / progressBarWidth)}
+        />
+      </View>
+      <View style={styles.timeRow}>
+        <Text style={styles.timeText}>{formatTime(currentTime)}</Text>
+        <Text style={styles.timeText}>{formatTime(duration)}</Text>
+      </View>
+
+      <View style={styles.controlRow}>
+        <TouchableOpacity style={styles.skipButton} onPress={() => handleSkip(-15)}>
+          <Text style={styles.skipText}>-15</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.skipButton} onPress={() => handleSkip(-3)}>
+          <Text style={styles.skipText}>-3</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.controlButton} onPress={handlePlayPause}>
+          <Text style={styles.controlIcon}>{isPlaying ? '⏸' : '▶'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.skipButton} onPress={() => handleSkip(3)}>
+          <Text style={styles.skipText}>+3</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.skipButton} onPress={() => handleSkip(15)}>
+          <Text style={styles.skipText}>+15</Text>
         </TouchableOpacity>
       </View>
 
+      <View style={styles.speedRow}>
+        <TouchableOpacity style={styles.speedButton} onPress={handleSpeedCycle}>
+          <Text style={styles.speedText}>{playbackRate}x</Text>
+        </TouchableOpacity>
+      </View>
+
+      {mode === 'listen' && (
+        <View style={styles.section}>
+          <TouchableOpacity style={styles.recordStartButton} onPress={handleStartRecording}>
+            <Text style={styles.recordStartText}>Start Shadowing</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {mode === 'record' && (
+        <View style={styles.section}>
+          {recorderState.isRecording ? (
+            <Text style={styles.recordLabel}>
+              Recording... {formatTime(recorderState.durationMillis / 1000)}
+            </Text>
+          ) : (
+            <View style={styles.preparingRow}>
+              <ActivityIndicator size="small" color={colors.textSecondary} />
+              <Text style={styles.recordLabel}>Preparing...</Text>
+            </View>
+          )}
+          <TouchableOpacity
+            style={[styles.recordButton, styles.recordButtonActive]}
+            onPress={handleStopRecording}
+          >
+            <Text style={styles.recordIcon}>Stop</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {mode === 'compare' && (
+        <View style={styles.section}>
+          <Text style={styles.compareLabel}>Compare your recording</Text>
+          <View style={styles.compareRow}>
+            <TouchableOpacity
+              style={[styles.compareButton, activePlayer === 'original' && styles.compareButtonActive]}
+              onPress={handlePlayOriginal}
+            >
+              <Text style={styles.compareButtonText}>Original</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.compareButton, activePlayer === 'recording' && styles.compareButtonActive, !recordingUri && styles.compareButtonDisabled]}
+              onPress={handlePlayRecording}
+              disabled={!recordingUri}
+            >
+              <Text style={styles.compareButtonText}>Mine</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={styles.actionRow}>
+            <TouchableOpacity
+              style={[styles.saveButton, saved && styles.saveButtonSaved]}
+              onPress={handleSaveAttempt}
+              disabled={saved}
+            >
+              <Text style={styles.saveButtonText}>{saved ? 'Saved' : 'Save'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.retryButtonSmall} onPress={handleReset}>
+              <Text style={styles.retryButtonSmallText}>Try Again</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* Description */}
       {episode.description && (
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Description</Text>
@@ -115,62 +395,94 @@ export default function EpisodeDetailScreen() {
         </View>
       )}
 
+      {/* Transcript */}
       <View style={styles.section}>
-        <View style={styles.sectionHeader}>
+        <View style={styles.transcriptHeader}>
           <Text style={styles.sectionTitle}>Transcript</Text>
-          <Text style={styles.hintText}>Long-press a line to save words</Text>
-        </View>
-        {episode.transcript_segments && episode.transcript_segments.length > 0 ? (
-          <View style={styles.transcriptContainer}>
-            {episode.transcript_segments.map((seg, i) => (
+          <View style={styles.transcriptActions}>
+            <TouchableOpacity
+              style={styles.transcriptToggle}
+              onPress={() => setShowTranscript(!showTranscript)}
+            >
+              <Text style={styles.transcriptToggleText}>
+                {showTranscript ? 'Hide' : 'Show'}
+              </Text>
+            </TouchableOpacity>
+            {episode.transcript && (
               <TouchableOpacity
-                key={i}
-                style={styles.transcriptLine}
-                onLongPress={() => handleWordLongPress(seg.text.split(/\s+/)[0] || seg.text, seg.text)}
-                delayLongPress={500}
+                style={styles.vocabButton}
+                onPress={() => {
+                  setSelectedWord('');
+                  setSelectedContext('');
+                  setDefinition('');
+                  setSaveModalVisible(true);
+                }}
               >
-                {seg.speaker ? (
-                  <Text style={styles.transcriptText}>
-                    <Text style={styles.transcriptSpeaker}>{seg.speaker}: </Text>
-                    {seg.text}
-                  </Text>
-                ) : (
-                  <Text style={styles.transcriptText}>{seg.text}</Text>
-                )}
+                <Text style={styles.vocabButtonText}>+ Word</Text>
               </TouchableOpacity>
-            ))}
+            )}
           </View>
-        ) : episode.transcript ? (
-          <View style={styles.transcriptContainer}>
-            {episode.transcript.split('\n').filter(Boolean).map((line, i) => {
-              const trimmed = line.trim();
-              if (!trimmed) return null;
-              return (
-                <TouchableOpacity
-                  key={i}
-                  style={styles.transcriptLine}
-                  onLongPress={() => handleWordLongPress(trimmed.split(/\s+/)[0] || trimmed, trimmed)}
-                  delayLongPress={500}
-                >
-                  <Text style={styles.transcriptText}>{trimmed}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        ) : (
-          <View style={styles.noTranscript}>
-            <Text style={styles.noTranscriptText}>
-              {episode.fetch_status === 'failed'
-                ? 'Transcript unavailable'
-                : 'Fetching transcript...'}
-            </Text>
-          </View>
+        </View>
+        {showTranscript && (
+          <>
+            <Text style={styles.hintText}>Long-press a line to choose a word</Text>
+            {episode.transcript_segments && episode.transcript_segments.length > 0 ? (
+              <View style={styles.transcriptContainer}>
+                {episode.transcript_segments.map((seg, i) => (
+                  <TouchableOpacity
+                    key={i}
+                    style={styles.transcriptLine}
+                    onLongPress={() => handleWordLongPress(seg.text)}
+                    delayLongPress={500}
+                  >
+                    {seg.speaker ? (
+                      <Text style={styles.transcriptText}>
+                        <Text style={styles.transcriptSpeaker}>{seg.speaker}: </Text>
+                        {seg.text}
+                      </Text>
+                    ) : (
+                      <Text style={styles.transcriptText}>{seg.text}</Text>
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : episode.transcript ? (
+              <View style={styles.transcriptContainer}>
+                {episode.transcript.split('\n').filter(Boolean).map((line, i) => {
+                  const trimmed = line.trim();
+                  if (!trimmed) return null;
+                  return (
+                    <TouchableOpacity
+                      key={i}
+                      style={styles.transcriptLine}
+                      onLongPress={() => handleWordLongPress(trimmed)}
+                      delayLongPress={500}
+                    >
+                      <Text style={styles.transcriptText}>{trimmed}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            ) : (
+              <View style={styles.noTranscript}>
+                {episode.fetch_status === 'failed' ? (
+                  <Text style={styles.noTranscriptText}>Transcript unavailable</Text>
+                ) : (
+                  <View style={styles.fetchingRow}>
+                    <ActivityIndicator size="small" color={colors.textMuted} />
+                    <Text style={styles.noTranscriptText}>Fetching transcript...</Text>
+                  </View>
+                )}
+              </View>
+            )}
+          </>
         )}
       </View>
 
+      {/* Vocab modal */}
       <Modal visible={saveModalVisible} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setSaveModalVisible(false)}>
+          <TouchableOpacity activeOpacity={1} style={styles.modalContent} onPress={(e) => e.stopPropagation()}>
             <Text style={styles.modalTitle}>Save to Vocabulary</Text>
 
             <Text style={styles.modalLabel}>Word / Phrase</Text>
@@ -178,8 +490,9 @@ export default function EpisodeDetailScreen() {
               style={styles.modalInput}
               value={selectedWord}
               onChangeText={setSelectedWord}
-              placeholder="Enter word or phrase"
+              placeholder="Type the exact word or phrase"
               autoCapitalize="none"
+              autoFocus
             />
 
             <Text style={styles.modalLabel}>Definition (optional)</Text>
@@ -206,15 +519,15 @@ export default function EpisodeDetailScreen() {
                 <Text style={styles.modalCancelText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.modalSave, saving && styles.modalSaveDisabled]}
+                style={[styles.modalSave, (saving || !selectedWord.trim()) && styles.modalSaveDisabled]}
                 onPress={handleSaveWord}
-                disabled={saving}
+                disabled={saving || !selectedWord.trim()}
               >
                 <Text style={styles.modalSaveText}>{saving ? 'Saving...' : 'Save'}</Text>
               </TouchableOpacity>
             </View>
-          </View>
-        </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
       </Modal>
     </ScrollView>
   );
@@ -227,6 +540,7 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: spacing.lg,
+    paddingBottom: spacing.xxl,
   },
   center: {
     flex: 1,
@@ -245,45 +559,249 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginBottom: spacing.lg,
   },
-  actionRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    marginBottom: spacing.lg,
+  // Player
+  progressBar: {
+    height: 4,
+    backgroundColor: colors.border,
+    borderRadius: 2,
+    marginBottom: spacing.xs,
+    position: 'relative',
   },
-  playButton: {
-    flex: 1,
+  progressFill: {
+    height: '100%',
     backgroundColor: colors.primary,
-    borderRadius: borderRadius.md,
-    padding: spacing.md,
+    borderRadius: 2,
+    position: 'absolute',
+    left: 0,
+    top: 0,
+  },
+  progressTouch: {
+    position: 'absolute',
+    top: -20,
+    left: 0,
+    right: 0,
+    bottom: -20,
+  },
+  timeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: spacing.md,
+  },
+  timeText: {
+    fontSize: fontSize.xs,
+    color: colors.textMuted,
+  },
+  controlRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  skipButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.surfaceAlt,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  skipText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textSecondary,
+  },
+  controlButton: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: colors.primary,
+    justifyContent: 'center',
     alignItems: 'center',
   },
-  playButtonText: {
+  controlIcon: {
+    fontSize: 28,
+    color: colors.surface,
+    fontWeight: '700',
+  },
+  speedRow: {
+    alignItems: 'center',
+    marginBottom: spacing.lg,
+  },
+  speedButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: colors.surface,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  speedText: {
+    fontSize: fontSize.sm,
+    fontWeight: '600',
+    color: colors.text,
+  },
+  // Shadowing
+  section: {
+    marginBottom: spacing.lg,
+  },
+  recordStartButton: {
+    backgroundColor: colors.error,
+    borderRadius: borderRadius.lg,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.xl,
+    alignSelf: 'center',
+  },
+  recordStartText: {
     color: colors.surface,
     fontSize: fontSize.md,
     fontWeight: '600',
   },
-  section: {
-    marginBottom: spacing.lg,
+  recordLabel: {
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
+    marginBottom: spacing.md,
+    textAlign: 'center',
   },
-  sectionHeader: {
+  preparingRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'baseline',
-    marginBottom: spacing.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
   },
+  recordButton: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: colors.error,
+    justifyContent: 'center',
+    alignItems: 'center',
+    alignSelf: 'center',
+  },
+  recordButtonActive: {
+    backgroundColor: colors.text,
+  },
+  recordIcon: {
+    fontSize: 16,
+    color: colors.surface,
+    fontWeight: '700',
+  },
+  compareLabel: {
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
+    marginBottom: spacing.md,
+    textAlign: 'center',
+  },
+  compareRow: {
+    flexDirection: 'row',
+    gap: spacing.md,
+    marginBottom: spacing.md,
+  },
+  compareButton: {
+    flex: 1,
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  compareButtonActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryLight + '20',
+  },
+  compareButtonDisabled: {
+    opacity: 0.4,
+  },
+  compareButtonText: {
+    fontSize: fontSize.sm,
+    fontWeight: '500',
+    color: colors.text,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  saveButton: {
+    flex: 1,
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    alignItems: 'center',
+  },
+  saveButtonSaved: {
+    backgroundColor: colors.success,
+  },
+  saveButtonText: {
+    color: colors.surface,
+    fontSize: fontSize.sm,
+    fontWeight: '600',
+  },
+  retryButtonSmall: {
+    flex: 1,
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    alignItems: 'center',
+  },
+  retryButtonSmallText: {
+    color: colors.textSecondary,
+    fontSize: fontSize.sm,
+    fontWeight: '500',
+  },
+  // Description
   sectionTitle: {
     fontSize: fontSize.lg,
     fontWeight: '600',
     color: colors.text,
   },
-  hintText: {
-    fontSize: fontSize.xs,
-    color: colors.textMuted,
-  },
   description: {
     fontSize: fontSize.md,
     color: colors.textSecondary,
     lineHeight: 24,
+    marginTop: spacing.sm,
+  },
+  // Transcript
+  transcriptHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.xs,
+  },
+  transcriptActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  transcriptToggle: {
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+  },
+  transcriptToggleText: {
+    color: colors.primary,
+    fontSize: fontSize.sm,
+    fontWeight: '500',
+  },
+  vocabButton: {
+    backgroundColor: colors.secondary,
+    borderRadius: borderRadius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  vocabButtonText: {
+    color: colors.surface,
+    fontSize: fontSize.xs,
+    fontWeight: '600',
+  },
+  hintText: {
+    fontSize: fontSize.xs,
+    color: colors.textMuted,
+    marginBottom: spacing.sm,
   },
   transcriptContainer: {
     backgroundColor: colors.surface,
@@ -314,6 +832,12 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: fontSize.sm,
   },
+  fetchingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  // Error
   errorText: {
     color: colors.error,
     fontSize: fontSize.md,
@@ -331,6 +855,7 @@ const styles = StyleSheet.create({
     fontSize: fontSize.md,
     fontWeight: '600',
   },
+  // Modal
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
