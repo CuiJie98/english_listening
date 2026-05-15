@@ -41,6 +41,10 @@ function parseRssXml(xml: string): FeedItem[] {
     const bbcId = rawGuid || extractBbcIdFromLink(link) || title;
     const cleanLink = link ? extractCdataContent(link) : '';
 
+    if (!cleanLink || !enclosure || !isSpecificEpisodeLink(cleanLink)) {
+      continue;
+    }
+
     items.push({
       bbc_id: bbcId,
       title: extractCdataContent(title) || title,
@@ -96,6 +100,11 @@ function extractBbcIdFromLink(link: string | null): string | null {
   const numMatch = /\/(\d{6})(?:\/|$)/.exec(clean);
   if (numMatch) return numMatch[1];
   return null;
+}
+
+function isSpecificEpisodeLink(link: string): boolean {
+  const clean = extractCdataContent(link);
+  return /\/(?:ep-)?\d{6}(?:[/?#]|$)/i.test(clean);
 }
 
 function parseDuration(duration: string): number | null {

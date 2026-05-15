@@ -95,8 +95,16 @@ export async function updateEpisodeTranscriptById(
 
 export async function getPendingEpisodes(db: D1Database, limit = 5): Promise<Episode[]> {
   const { results } = await db.prepare(
-    `SELECT * FROM episodes WHERE fetch_status IN ('pending', 'failed')
-      OR (fetch_status = 'done' AND (transcript IS NULL OR transcript = '' OR transcript_segments IS NULL))
+    `SELECT * FROM episodes
+     WHERE audio_url IS NOT NULL AND audio_url != ''
+       AND (
+         page_url LIKE '%/ep-%'
+         OR page_url GLOB '*/[0-9][0-9][0-9][0-9][0-9][0-9]'
+       )
+       AND (
+         fetch_status IN ('pending', 'failed')
+         OR (fetch_status = 'done' AND (transcript IS NULL OR transcript = '' OR transcript_segments IS NULL))
+       )
      LIMIT ?`
   ).bind(limit).all<Episode>();
   return results ?? [];
