@@ -197,15 +197,19 @@ function splitBySpeakers(html: string): TranscriptSegment[] {
 }
 
 function buildResult(segments: TranscriptSegment[]): TranscriptResult {
-  const plain = segments.map((s) => `${s.speaker}: ${s.text}`).join('\n');
+  const plain = segments.map((s) => `${s.speaker}: ${s.text.replace(/<\/?b>/g, '')}`).join('\n');
   return { plain, segments };
 }
 
 function cleanHtml(html: string): string {
   return html
+    .replace(/<(strong|b)>/gi, '\x01')
+    .replace(/<\/(strong|b)>/gi, '\x02')
     .replace(/<br\s*\/?>/gi, ' ')
     .replace(/<\/p>/gi, '\n')
     .replace(/<[^>]+>/g, '')
+    .replace(/\x01/g, '<b>')
+    .replace(/\x02/g, '</b>')
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')

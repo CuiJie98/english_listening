@@ -309,6 +309,30 @@ export default function EpisodeDetailScreen() {
     );
   }
 
+  const renderTextWithBold = (text: string, context: string) => {
+    const parts = text.split(/(<b>.*?<\/b>)/g);
+    let key = 0;
+    return parts.map((part) => {
+      const boldMatch = /^<b>(.*?)<\/b>$/.exec(part);
+      if (boldMatch) {
+        const phrase = boldMatch[1];
+        return (
+          <Text key={key++} style={[styles.wordTap, styles.wordBold]} onPress={() => handleWordTap(phrase, context)}>
+            {phrase}
+          </Text>
+        );
+      }
+      return part.split(/(\s+)/).map((token) => {
+        if (/\s+/.test(token)) return <Text key={key++}>{token}</Text>;
+        return (
+          <Text key={key++} style={styles.wordTap} onPress={() => handleWordTap(token, context)}>
+            {token}
+          </Text>
+        );
+      });
+    });
+  };
+
   const formatDate = (ts: number | null) => {
     if (!ts) return '';
     return new Date(ts * 1000).toLocaleDateString('en-GB', {
@@ -474,15 +498,7 @@ export default function EpisodeDetailScreen() {
                       {seg.speaker && (
                         <Text style={styles.transcriptSpeaker}>{seg.speaker}: </Text>
                       )}
-                      {seg.text.split(/(\s+)/).map((token, j) =>
-                        /\s+/.test(token) ? (
-                          <Text key={j}>{token}</Text>
-                        ) : (
-                          <Text key={j} style={styles.wordTap} onPress={() => handleWordTap(token, seg.text)}>
-                            {token}
-                          </Text>
-                        )
-                      )}
+                      {renderTextWithBold(seg.text, seg.text)}
                     </Text>
                   </View>
                 ))}
@@ -495,15 +511,7 @@ export default function EpisodeDetailScreen() {
                   return (
                     <View key={i} style={styles.transcriptLine}>
                       <Text style={styles.transcriptText}>
-                        {trimmed.split(/(\s+)/).map((token, j) =>
-                          /\s+/.test(token) ? (
-                            <Text key={j}>{token}</Text>
-                          ) : (
-                            <Text key={j} style={styles.wordTap} onPress={() => handleWordTap(token, trimmed)}>
-                              {token}
-                            </Text>
-                          )
-                        )}
+                        {renderTextWithBold(trimmed, trimmed)}
                       </Text>
                     </View>
                   );
@@ -870,6 +878,9 @@ const styles = StyleSheet.create({
   },
   wordTap: {
     color: colors.text,
+  },
+  wordBold: {
+    fontWeight: '700',
   },
   noTranscript: {
     backgroundColor: colors.surfaceAlt,
