@@ -1,10 +1,11 @@
-import { View, Text, StyleSheet, TouchableOpacity, Alert, FlatList, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, FlatList, ActivityIndicator, Modal, TextInput } from 'react-native';
 import { useEffect, useState, useCallback } from 'react';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
 import {
   getVocabCards,
   getDueVocabCards,
   deleteVocabCard,
+  updateVocabCard,
   submitReview,
   type VocabWithReview,
 } from '../../src/services/apiClient';
@@ -18,6 +19,11 @@ export default function VocabScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [editModalVisible, setEditModalVisible] = useState(false);
+  const [editCard, setEditCard] = useState<VocabWithReview | null>(null);
+  const [editWord, setEditWord] = useState('');
+  const [editDefinition, setEditDefinition] = useState('');
+  const [editContext, setEditContext] = useState('');
 
   const loadCards = useCallback(async () => {
     try {
@@ -72,22 +78,56 @@ export default function VocabScreen() {
     }
   };
 
-  const handleDelete = (id: number) => {
-    Alert.alert('Delete', 'Remove this card?', [
-      { text: 'Cancel', style: 'cancel' },
+  const handleCardAction = (card: VocabWithReview) => {
+    Alert.alert(card.word_or_phrase, undefined, [
+      {
+        text: 'Edit',
+        onPress: () => {
+          setEditCard(card);
+          setEditWord(card.word_or_phrase);
+          setEditDefinition(card.definition || '');
+          setEditContext(card.context || '');
+          setEditModalVisible(true);
+        },
+      },
       {
         text: 'Delete',
         style: 'destructive',
-        onPress: async () => {
-          try {
-            await deleteVocabCard(id);
-            await loadCards();
-          } catch (err: any) {
-            Alert.alert('Error', err?.message || 'Failed to delete card');
-          }
+        onPress: () => {
+          Alert.alert('Delete', 'Remove this card?', [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Delete',
+              style: 'destructive',
+              onPress: async () => {
+                try {
+                  await deleteVocabCard(card.id);
+                  await loadCards();
+                } catch (err: any) {
+                  Alert.alert('Error', err?.message || 'Failed to delete card');
+                }
+              },
+            },
+          ]);
         },
       },
+      { text: 'Cancel', style: 'cancel' },
     ]);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editCard || !editWord.trim()) return;
+    try {
+      await updateVocabCard(editCard.id, {
+        word_or_phrase: editWord.trim(),
+        definition: editDefinition.trim() || undefined,
+        context: editContext.trim() || undefined,
+      });
+      setEditModalVisible(false);
+      await loadCards();
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Failed to update card');
+    }
   };
 
   if (loading) {
@@ -199,7 +239,7 @@ export default function VocabScreen() {
           renderItem={({ item }) => (
             <TouchableOpacity
               style={styles.vocabCard}
-              onLongPress={() => handleDelete(item.id)}
+              onLongPress={() => handleCardAction(item)}
             >
               <Text style={styles.vocabWord}>{item.word_or_phrase}</Text>
               {item.definition && (
@@ -217,6 +257,55 @@ export default function VocabScreen() {
           contentContainerStyle={styles.cardList}
         />
       )}
+
+      <Modal visible={editModalVisible} transparent animationType="slide">
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setEditModalVisible(false)}>
+          <TouchableOpacity activeOpacity={1} style={styles.modalContent} onPress={(e) => e.stopPropagation()}>
+            <Text style={styles.modalTitle}>Edit Card</Text>
+
+            <Text style={styles.modalLabel}>Word / Phrase</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={editWord}
+              onChangeText={setEditWord}
+              placeholder="Word or phrase"
+              autoCapitalize="none"
+              autoFocus
+            />
+
+            <Text style={styles.modalLabel}>Definition</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={editDefinition}
+              onChangeText={setEditDefinition}
+              placeholder="Definition (optional)"
+              autoCapitalize="none"
+            />
+
+            <Text style={styles.modalLabel}>Context</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={editContext}
+              onChangeText={setEditContext}
+              placeholder="Context (optional)"
+              autoCapitalize="none"
+            />
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.modalCancel} onPress={() => setEditModalVisible(false)}>
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalSave, !editWord.trim() && styles.modalSaveDisabled]}
+                onPress={handleSaveEdit}
+                disabled={!editWord.trim()}
+              >
+                <Text style={styles.modalSaveText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
     </View>
   );
 }
@@ -391,5 +480,67 @@ const styles = StyleSheet.create({
   exitButtonText: {
     color: colors.textSecondary,
     fontSize: fontSize.sm,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: borderRadius.lg,
+    borderTopRightRadius: borderRadius.lg,
+    padding: spacing.lg,
+  },
+  modalTitle: {
+    fontSize: fontSize.lg,
+    fontWeight: '600',
+    color: colors.text,
+    marginBottom: spacing.md,
+  },
+  modalLabel: {
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
+    marginBottom: spacing.xs,
+    marginTop: spacing.sm,
+  },
+  modalInput: {
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: borderRadius.sm,
+    padding: spacing.sm,
+    fontSize: fontSize.md,
+    color: colors.text,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: spacing.md,
+    marginTop: spacing.lg,
+  },
+  modalCancel: {
+    flex: 1,
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    alignItems: 'center',
+  },
+  modalCancelText: {
+    color: colors.textSecondary,
+    fontSize: fontSize.md,
+    fontWeight: '500',
+  },
+  modalSave: {
+    flex: 1,
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    alignItems: 'center',
+  },
+  modalSaveDisabled: {
+    opacity: 0.5,
+  },
+  modalSaveText: {
+    color: colors.surface,
+    fontSize: fontSize.md,
+    fontWeight: '600',
   },
 });

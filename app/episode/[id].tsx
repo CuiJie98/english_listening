@@ -13,7 +13,7 @@ import {
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
 import { SPEED_OPTIONS } from '../../src/constants/config';
 import { getEpisode, insertVocabCard, getAudioUrl, insertAttempt } from '../../src/services/apiClient';
-import { getPlaybackSpeed, setPlaybackSpeed } from '../../src/services/storage';
+import { getPlaybackSpeed, setPlaybackSpeed, getPlaybackPosition, setPlaybackPosition } from '../../src/services/storage';
 import type { Episode } from '../../src/types/episode';
 
 type Mode = 'listen' | 'record' | 'compare';
@@ -42,6 +42,8 @@ export default function EpisodeDetailScreen() {
   const [playbackRate, setPlaybackRateState] = useState(1.0);
   const [progressBarWidth, setProgressBarWidth] = useState(1);
   const listenSavedForEpisode = useRef<number | null>(null);
+  const lastSavedPositionTime = useRef(0);
+  const positionRestored = useRef(false);
 
   // Audio
   const originalPlayer = useAudioPlayer(
@@ -93,6 +95,35 @@ export default function EpisodeDetailScreen() {
       .then((rate) => setPlaybackRate(rate))
       .catch(() => setPlaybackRate(1.0));
   }, [setPlaybackRate]);
+
+  // Restore playback position
+  useEffect(() => {
+    if (!episode || positionRestored.current || !duration) return;
+    positionRestored.current = true;
+    getPlaybackPosition(episode.id).then((pos) => {
+      if (pos > 0 && pos < duration - 2) {
+        originalPlayer.seekTo(pos).catch(() => {});
+      }
+    });
+  }, [episode, duration, originalPlayer]);
+
+  // Periodically save playback position
+  useEffect(() => {
+    if (!episode || !isPlaying) return;
+    const now = Date.now();
+    if (now - lastSavedPositionTime.current < 5000) return;
+    lastSavedPositionTime.current = now;
+    setPlaybackPosition(episode.id, currentTime).catch(() => {});
+  }, [episode, isPlaying, currentTime]);
+
+  // Save position on unmount
+  useEffect(() => {
+    return () => {
+      if (episode && currentTime > 0) {
+        setPlaybackPosition(episode.id, currentTime).catch(() => {});
+      }
+    };
+  }, [episode?.id]);
 
   useEffect(() => {
     if (!episode || activePlayer !== 'original' || !originalStatus.didJustFinish) return;
@@ -224,6 +255,15 @@ export default function EpisodeDetailScreen() {
   };
 
   // Vocab
+  const handleWordTap = (word: string, context: string) => {
+    const cleaned = word.replace(/[^a-zA-Z'-]/g, '').trim();
+    if (!cleaned) return;
+    setSelectedWord(cleaned);
+    setSelectedContext(context);
+    setDefinition('');
+    setSaveModalVisible(true);
+  };
+
   const handleWordLongPress = (context: string) => {
     setSelectedWord('');
     setSelectedContext(context);
@@ -425,25 +465,26 @@ export default function EpisodeDetailScreen() {
         </View>
         {showTranscript && (
           <>
-            <Text style={styles.hintText}>Long-press a line to choose a word</Text>
+            <Text style={styles.hintText}>Tap a word to save it</Text>
             {episode.transcript_segments && episode.transcript_segments.length > 0 ? (
               <View style={styles.transcriptContainer}>
                 {episode.transcript_segments.map((seg, i) => (
-                  <TouchableOpacity
-                    key={i}
-                    style={styles.transcriptLine}
-                    onLongPress={() => handleWordLongPress(seg.text)}
-                    delayLongPress={500}
-                  >
-                    {seg.speaker ? (
-                      <Text style={styles.transcriptText}>
+                  <View key={i} style={styles.transcriptLine}>
+                    <Text style={styles.transcriptText}>
+                      {seg.speaker && (
                         <Text style={styles.transcriptSpeaker}>{seg.speaker}: </Text>
-                        {seg.text}
-                      </Text>
-                    ) : (
-                      <Text style={styles.transcriptText}>{seg.text}</Text>
-                    )}
-                  </TouchableOpacity>
+                      )}
+                      {seg.text.split(/(\s+)/).map((token, j) =>
+                        /\s+/.test(token) ? (
+                          <Text key={j}>{token}</Text>
+                        ) : (
+                          <Text key={j} style={styles.wordTap} onPress={() => handleWordTap(token, seg.text)}>
+                            {token}
+                          </Text>
+                        )
+                      )}
+                    </Text>
+                  </View>
                 ))}
               </View>
             ) : episode.transcript ? (
@@ -452,14 +493,19 @@ export default function EpisodeDetailScreen() {
                   const trimmed = line.trim();
                   if (!trimmed) return null;
                   return (
-                    <TouchableOpacity
-                      key={i}
-                      style={styles.transcriptLine}
-                      onLongPress={() => handleWordLongPress(trimmed)}
-                      delayLongPress={500}
-                    >
-                      <Text style={styles.transcriptText}>{trimmed}</Text>
-                    </TouchableOpacity>
+                    <View key={i} style={styles.transcriptLine}>
+                      <Text style={styles.transcriptText}>
+                        {trimmed.split(/(\s+)/).map((token, j) =>
+                          /\s+/.test(token) ? (
+                            <Text key={j}>{token}</Text>
+                          ) : (
+                            <Text key={j} style={styles.wordTap} onPress={() => handleWordTap(token, trimmed)}>
+                              {token}
+                            </Text>
+                          )
+                        )}
+                      </Text>
+                    </View>
                   );
                 })}
               </View>
@@ -821,6 +867,9 @@ const styles = StyleSheet.create({
   transcriptSpeaker: {
     fontWeight: '700',
     color: colors.primary,
+  },
+  wordTap: {
+    color: colors.text,
   },
   noTranscript: {
     backgroundColor: colors.surfaceAlt,

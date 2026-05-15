@@ -160,6 +160,25 @@ export async function deleteVocabCard(db: D1Database, id: number, userId: string
   return (result.meta.changes ?? 0) > 0;
 }
 
+export async function updateVocabCard(
+  db: D1Database,
+  id: number,
+  userId: string,
+  fields: { word_or_phrase?: string; context?: string; definition?: string }
+): Promise<boolean> {
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  if (fields.word_or_phrase !== undefined) { sets.push('word_or_phrase = ?'); values.push(fields.word_or_phrase); }
+  if (fields.context !== undefined) { sets.push('context = ?'); values.push(fields.context); }
+  if (fields.definition !== undefined) { sets.push('definition = ?'); values.push(fields.definition); }
+  if (sets.length === 0) return false;
+  values.push(id, userId);
+  const result = await db.prepare(
+    `UPDATE vocab_cards SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`
+  ).bind(...values).run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
 export async function getReviewState(db: D1Database, cardId: number): Promise<ReviewState | null> {
   return db.prepare('SELECT * FROM review_state WHERE card_id = ?').bind(cardId).first<ReviewState>();
 }

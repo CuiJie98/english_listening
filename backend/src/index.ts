@@ -1,7 +1,7 @@
 import { Router } from './router';
 import { handleListEpisodes, handleGetEpisode } from './handlers/episodes';
 import { handleStreamAudio } from './handlers/audio';
-import { handleListVocab, handleDueVocab, handleCreateVocab, handleDeleteVocab, handleReviewVocab } from './handlers/vocab';
+import { handleListVocab, handleDueVocab, handleCreateVocab, handleUpdateVocab, handleDeleteVocab, handleReviewVocab } from './handlers/vocab';
 import { handleCreateAttempt, handleListAttempts } from './handlers/attempts';
 import { handleGetStats } from './handlers/stats';
 import { fetchFeed } from './services/feedFetcher';
@@ -33,6 +33,7 @@ router.get('/api/episodes/:id', (req, params, env) => handleGetEpisode(req, para
 router.get('/api/vocab', (req, params, env) => handleListVocab(req, params, env));
 router.get('/api/vocab/due', (req, params, env) => handleDueVocab(req, params, env));
 router.post('/api/vocab', (req, params, env) => handleCreateVocab(req, params, env));
+router.put('/api/vocab/:id', (req, params, env) => handleUpdateVocab(req, params, env));
 router.delete('/api/vocab/:id', (req, params, env) => handleDeleteVocab(req, params, env));
 router.post('/api/vocab/:id/review', (req, params, env) => handleReviewVocab(req, params, env));
 
@@ -262,7 +263,7 @@ function requireAdmin(request: Request, env: Env): Response | null {
 function corsHeaders(): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, X-User-Id, X-Admin-Secret',
   };
 }

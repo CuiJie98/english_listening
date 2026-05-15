@@ -89,6 +89,10 @@ export async function deleteVocabCard(id: number): Promise<void> {
   await apiFetch(`/api/vocab/${id}`, { method: 'DELETE' });
 }
 
+export async function updateVocabCard(id: number, fields: { word_or_phrase?: string; context?: string; definition?: string }): Promise<void> {
+  await apiFetch(`/api/vocab/${id}`, { method: 'PUT', body: JSON.stringify(fields) });
+}
+
 export interface ReviewResult {
   easiness: number;
   interval_days: number;

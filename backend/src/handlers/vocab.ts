@@ -4,6 +4,7 @@ import {
   getDueVocabCards,
   insertVocabCard,
   deleteVocabCard,
+  updateVocabCard,
   getVocabCardById,
   getReviewState,
   upsertReviewState,
@@ -48,6 +49,32 @@ export async function handleCreateVocab(request: Request, _params: Record<string
   });
 
   return Response.json({ id }, { status: 201 });
+}
+
+export async function handleUpdateVocab(request: Request, params: Record<string, string>, env: Env): Promise<Response> {
+  const userId = requireUserId(request);
+
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) {
+    return Response.json({ error: 'Invalid card ID' }, { status: 400 });
+  }
+
+  const body = await request.json<{ word_or_phrase?: string; context?: string; definition?: string }>();
+  const fields: { word_or_phrase?: string; context?: string; definition?: string } = {};
+  if (body.word_or_phrase !== undefined) fields.word_or_phrase = body.word_or_phrase.trim();
+  if (body.context !== undefined) fields.context = body.context;
+  if (body.definition !== undefined) fields.definition = body.definition;
+
+  if (fields.word_or_phrase !== undefined && !fields.word_or_phrase) {
+    return Response.json({ error: 'word_or_phrase cannot be empty' }, { status: 400 });
+  }
+
+  const updated = await updateVocabCard(env.DB, id, userId, fields);
+  if (!updated) {
+    return Response.json({ error: 'Card not found' }, { status: 404 });
+  }
+
+  return Response.json({ ok: true });
 }
 
 export async function handleDeleteVocab(request: Request, params: Record<string, string>, env: Env): Promise<Response> {

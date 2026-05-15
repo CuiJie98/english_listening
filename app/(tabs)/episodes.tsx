@@ -1,5 +1,5 @@
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, FlatList, RefreshControl } from 'react-native';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useRouter } from 'expo-router';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
 import { getEpisodes, getAttempts, type AttemptWithEpisode } from '../../src/services/apiClient';
@@ -17,6 +17,8 @@ export default function EpisodesScreen() {
   const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [attempts, setAttempts] = useState<AttemptWithEpisode[]>([]);
+
+  const listenedIds = useMemo(() => new Set(attempts.map((a) => a.episode_id)), [attempts]);
 
   const loadEpisodes = useCallback(async (nextPage = 1, append = false) => {
     try {
@@ -91,6 +93,11 @@ export default function EpisodesScreen() {
           {item.title}
         </Text>
         <View style={styles.badges}>
+          {listenedIds.has(item.id) && (
+            <View style={[styles.badge, styles.badgeListened]}>
+              <Text style={styles.badgeText}>✓</Text>
+            </View>
+          )}
           {item.has_transcript && (
             <View style={[styles.badge, styles.badgeSuccess]}>
               <Text style={styles.badgeText}>Text</Text>
@@ -245,6 +252,9 @@ const styles = StyleSheet.create({
   },
   badgeWarning: {
     backgroundColor: colors.warningLight,
+  },
+  badgeListened: {
+    backgroundColor: colors.primaryLight + '30',
   },
   badgeText: {
     fontSize: fontSize.xs,

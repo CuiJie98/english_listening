@@ -43,3 +43,17 @@ export async function getPlaybackSpeed(defaultSpeed = 1.0): Promise<number> {
 export async function setPlaybackSpeed(speed: number): Promise<void> {
   await AsyncStorage.setItem(PLAYBACK_SPEED_KEY, speed.toString());
 }
+
+export async function getPlaybackPosition(episodeId: number): Promise<number> {
+  const stored = await AsyncStorage.getItem(`playback_pos_${episodeId}`);
+  const pos = stored ? Number(stored) : 0;
+  return Number.isFinite(pos) && pos > 0 ? pos : 0;
+}
+
+export async function setPlaybackPosition(episodeId: number, time: number): Promise<void> {
+  if (time <= 0) {
+    await AsyncStorage.removeItem(`playback_pos_${episodeId}`);
+  } else {
+    await AsyncStorage.setItem(`playback_pos_${episodeId}`, time.toString());
+  }
+}
