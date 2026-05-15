@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS episodes (
   published_at  INTEGER,
   transcript    TEXT,
   transcript_segments TEXT,
+  alignment_words TEXT,
   fetch_status  TEXT DEFAULT 'pending'
                 CHECK(fetch_status IN ('pending','fetching','done','failed')),
   created_at    INTEGER NOT NULL DEFAULT (unixepoch())

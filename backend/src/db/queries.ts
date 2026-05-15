@@ -31,7 +31,7 @@ export async function getEpisodeByBbcId(db: D1Database, bbcId: string): Promise<
 
 export async function insertEpisode(
   db: D1Database,
-  ep: Omit<Episode, 'id' | 'created_at' | 'transcript_start_sec' | 'transcript_end_sec'>
+  ep: Omit<Episode, 'id' | 'created_at' | 'transcript_start_sec' | 'transcript_end_sec' | 'alignment_words'>
 ): Promise<void> {
   await db.prepare(
     `INSERT OR IGNORE INTO episodes (bbc_id, title, description, audio_url, audio_r2_key, page_url, duration_sec, published_at, transcript, transcript_segments, fetch_status)
@@ -115,6 +115,17 @@ export async function updateEpisodeAlignedSegments(
   await db.prepare(
     'UPDATE episodes SET transcript_segments = ? WHERE id = ?'
   ).bind(segments, id).run();
+}
+
+export async function updateEpisodeAiAlignment(
+  db: D1Database,
+  id: number,
+  segments: string,
+  words: string | null
+): Promise<void> {
+  await db.prepare(
+    'UPDATE episodes SET transcript_segments = ?, alignment_words = ? WHERE id = ?'
+  ).bind(segments, words, id).run();
 }
 
 export async function getEpisodesNeedingAlignment(db: D1Database, limit = 20): Promise<Episode[]> {

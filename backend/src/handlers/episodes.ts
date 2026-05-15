@@ -32,8 +32,18 @@ export async function handleGetEpisode(request: Request, params: Record<string, 
     }
   }
 
+  let alignmentWords = null;
+  if (episode.alignment_words) {
+    try {
+      alignmentWords = JSON.parse(episode.alignment_words);
+    } catch {
+      alignmentWords = null;
+    }
+  }
+
   return Response.json({
     ...episode,
     transcript_segments: segments,
+    alignment_words: alignmentWords,
   });
 }

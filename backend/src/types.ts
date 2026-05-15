@@ -19,6 +19,7 @@ export interface Episode {
   published_at: number;
   transcript: string | null;
   transcript_segments: string | null;
+  alignment_words: string | null;
   fetch_status: 'pending' | 'fetching' | 'done' | 'failed';
   created_at: number;
 }

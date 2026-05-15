@@ -17,6 +17,7 @@ import {
   getPendingEpisodes,
   updateEpisodeAlignmentWindow,
   updateEpisodeAlignedSegments,
+  updateEpisodeAiAlignment,
   getEpisodesNeedingAlignment,
 } from './db/queries';
 import {
@@ -113,6 +114,48 @@ router.post('/api/episodes/:id/align', async (req, params, env) => {
 
   const result = await alignEpisode(env, id);
   return Response.json(result.body, { status: result.status });
+});
+
+router.post('/api/episodes/:id/alignment-segments', async (req, params, env) => {
+  const adminError = requireAdmin(req, env);
+  if (adminError) return adminError;
+
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) return Response.json({ error: 'Invalid ID' }, { status: 400 });
+
+  const ep = await getEpisode(env.DB, id);
+  if (!ep) return Response.json({ error: 'Not found' }, { status: 404 });
+
+  let body: any = {};
+  try {
+    body = await req.json();
+  } catch {
+    return Response.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
+
+  const segmentResult = normalizeAlignmentSegments(body.segments);
+  if (!segmentResult.ok) {
+    return Response.json({ error: segmentResult.error }, { status: 400 });
+  }
+
+  const wordResult = normalizeAlignmentWords(body.words ?? body.alignment_words);
+  if (!wordResult.ok) {
+    return Response.json({ error: wordResult.error }, { status: 400 });
+  }
+
+  await updateEpisodeAiAlignment(
+    env.DB,
+    id,
+    JSON.stringify(segmentResult.value),
+    wordResult.value ? JSON.stringify(wordResult.value) : null
+  );
+
+  return Response.json({
+    ok: true,
+    episodeId: id,
+    segmentCount: segmentResult.value.length,
+    wordCount: wordResult.value?.length ?? 0,
+  });
 });
 
 router.post('/api/episodes/align-batch', async (req, _params, env) => {
@@ -377,6 +420,117 @@ function readOptionalSeconds(value: unknown): { value: number | null; invalid: b
     return { value: null, invalid: true };
   }
   return { value: Math.round(parsed * 100) / 100, invalid: false };
+}
+
+type NormalizeResult<T> = { ok: true; value: T } | { ok: false; error: string };
+
+function normalizeAlignmentSegments(value: unknown): NormalizeResult<Array<Record<string, unknown>>> {
+  if (!Array.isArray(value) || value.length === 0) {
+    return { ok: false, error: 'segments must be a non-empty array' };
+  }
+
+  const normalized: Array<Record<string, unknown>> = [];
+  let previousEnd = -Infinity;
+
+  for (let index = 0; index < value.length; index++) {
+    const raw = value[index];
+    if (!raw || typeof raw !== 'object') {
+      return { ok: false, error: `segments[${index}] must be an object` };
+    }
+    const segment = raw as Record<string, unknown>;
+    const text = typeof segment.text === 'string' ? segment.text.trim() : '';
+    const speaker = typeof segment.speaker === 'string' ? segment.speaker.trim() : '';
+    const start = readRequiredSeconds(segment.start);
+    const end = readRequiredSeconds(segment.end);
+    if (!text) return { ok: false, error: `segments[${index}].text is required` };
+    if (start === null) return { ok: false, error: `segments[${index}].start must be a number` };
+    if (end === null) return { ok: false, error: `segments[${index}].end must be a number` };
+    if (start < 0) return { ok: false, error: `segments[${index}].start must be >= 0` };
+    if (end <= start) return { ok: false, error: `segments[${index}].end must be greater than start` };
+    if (start < previousEnd) {
+      return { ok: false, error: `segments[${index}] must not overlap the previous segment` };
+    }
+
+    const confidence = readOptionalConfidence(segment.confidence);
+    if (confidence.invalid) {
+      return { ok: false, error: `segments[${index}].confidence must be between 0 and 1` };
+    }
+
+    previousEnd = end;
+    normalized.push({
+      speaker,
+      text,
+      start,
+      end,
+      confidence: confidence.value,
+      source: typeof segment.source === 'string' ? segment.source : 'ai',
+    });
+  }
+
+  return { ok: true, value: normalized };
+}
+
+function normalizeAlignmentWords(value: unknown): NormalizeResult<Array<Record<string, unknown>> | null> {
+  if (value === undefined || value === null) {
+    return { ok: true, value: null };
+  }
+  if (!Array.isArray(value)) {
+    return { ok: false, error: 'words must be an array when provided' };
+  }
+
+  const normalized: Array<Record<string, unknown>> = [];
+  let previousStart = -Infinity;
+
+  for (let index = 0; index < value.length; index++) {
+    const raw = value[index];
+    if (!raw || typeof raw !== 'object') {
+      return { ok: false, error: `words[${index}] must be an object` };
+    }
+    const word = raw as Record<string, unknown>;
+    const text = typeof word.word === 'string' ? word.word.trim() : '';
+    const start = readRequiredSeconds(word.start);
+    const end = readRequiredSeconds(word.end);
+    if (!text) return { ok: false, error: `words[${index}].word is required` };
+    if (start === null) return { ok: false, error: `words[${index}].start must be a number` };
+    if (end === null) return { ok: false, error: `words[${index}].end must be a number` };
+    if (start < 0) return { ok: false, error: `words[${index}].start must be >= 0` };
+    if (end <= start) return { ok: false, error: `words[${index}].end must be greater than start` };
+    if (start < previousStart) {
+      return { ok: false, error: `words[${index}] must be ordered by start time` };
+    }
+
+    const probability = readOptionalConfidence(word.probability);
+    if (probability.invalid) {
+      return { ok: false, error: `words[${index}].probability must be between 0 and 1` };
+    }
+
+    previousStart = start;
+    normalized.push({
+      word: text,
+      start,
+      end,
+      probability: probability.value,
+    });
+  }
+
+  return { ok: true, value: normalized };
+}
+
+function readRequiredSeconds(value: unknown): number | null {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.round(parsed * 100) / 100;
+}
+
+function readOptionalConfidence(value: unknown): { value: number | null; invalid: boolean } {
+  if (value === undefined || value === null || value === '') {
+    return { value: null, invalid: false };
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    return { value: null, invalid: true };
+  }
+  return { value: Math.round(parsed * 1000) / 1000, invalid: false };
 }
 
 async function alignEpisode(env: Env, id: number): Promise<{ status: number; body: Record<string, any> }> {

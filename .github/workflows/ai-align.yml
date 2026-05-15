@@ -1,0 +1,61 @@
+name: AI transcript alignment
+
+on:
+  workflow_dispatch:
+    inputs:
+      episode_id:
+        description: "Episode id to align. Leave empty to process the latest pending episode."
+        required: false
+        type: string
+      limit:
+        description: "How many pending episodes to process when episode_id is empty."
+        required: false
+        default: "1"
+        type: string
+      force:
+        description: "Re-align even if the episode already has timestamps."
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: "30 8 * * 4"
+
+jobs:
+  align:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: scripts/requirements-ai-align.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scripts/requirements-ai-align.txt
+
+      - name: Align transcript
+        env:
+          BBC_API_BASE: ${{ vars.BBC_API_BASE || 'https://bbc-english-api.1140390745.workers.dev' }}
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          WHISPER_MODEL: small.en
+          WHISPER_COMPUTE_TYPE: int8
+          EPISODE_ID: ${{ github.event.inputs.episode_id || '' }}
+          ALIGN_LIMIT: ${{ github.event.inputs.limit || '1' }}
+          FORCE_ALIGN: ${{ github.event.inputs.force || 'false' }}
+        run: |
+          args=()
+          if [ -n "$EPISODE_ID" ]; then
+            args+=(--episode-id "$EPISODE_ID")
+          else
+            args+=(--limit "$ALIGN_LIMIT")
+          fi
+          if [ "$FORCE_ALIGN" = "true" ]; then
+            args+=(--force)
+          fi
+          python scripts/ai_align_episode.py "${args[@]}"

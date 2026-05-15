@@ -12,6 +12,7 @@ export interface Episode {
   published_at: number | null;
   transcript: string | null;
   transcript_segments: TranscriptSegment[] | null;
+  alignment_words: AlignmentWord[] | null;
   fetch_status: 'pending' | 'fetching' | 'done' | 'failed';
   created_at: number;
 }
@@ -21,6 +22,15 @@ export interface TranscriptSegment {
   text: string;
   start?: number | null;
   end?: number | null;
+  confidence?: number | null;
+  source?: string | null;
+}
+
+export interface AlignmentWord {
+  word: string;
+  start: number;
+  end: number;
+  probability?: number | null;
 }
 
 export interface EpisodeSummary {

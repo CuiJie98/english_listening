@@ -60,6 +60,7 @@ npx wrangler pages deploy dist --project-name bbc-english-app --commit-message "
 | `GET /api/clear-transcripts?secret=xxx` | 清除所有 transcript 数据，状态重置为 `pending`，等 cron 自动重新抓取 |
 | `POST /api/episodes/:id/alignment-window?secret=xxx` | 设置正文音频窗口，例如 `{ "start": 12, "end": 356 }` |
 | `POST /api/episodes/:id/align?secret=xxx` | 按正文窗口为单集 transcript 段落生成启发式时间戳 |
+| `POST /api/episodes/:id/alignment-segments?secret=xxx` | 写入 AI 生成的句子级时间戳和可选 word 明细 |
 | `POST /api/episodes/align-batch?secret=xxx` | 批量为已有 transcript 生成段落时间戳 |
 
 ### 调试
@@ -101,6 +102,34 @@ curl "https://bbc-english-api.1140390745.workers.dev/api/sync?secret=debug2026"
 ```bash
 # 查看 transcript 提取详情
 curl "https://bbc-english-api.1140390745.workers.dev/api/debug/transcript/1?secret=debug2026"
+```
+
+### GitHub Actions 免费 AI 对齐
+
+项目包含 `.github/workflows/ai-align.yml`，可在 public GitHub 仓库中用免费的 GitHub-hosted runner 周更处理 BBC 单集。它会运行 `scripts/ai_align_episode.py`：
+
+1. 下载单集音频和官方 transcript。
+2. 使用 `faster-whisper` 在 CPU/int8 模式生成 word-level timestamps。
+3. 将 word timestamps 聚合成句子级 `start/end/confidence`。
+4. 通过 admin API 写回 `transcript_segments`，并保存 `alignment_words` 作为未来逐词能力的底层数据。
+
+需要在 GitHub 仓库配置：
+
+```text
+Secrets:
+  ADMIN_SECRET=你的 Worker 管理密钥
+
+Variables 可选:
+  BBC_API_BASE=https://bbc-english-api.1140390745.workers.dev
+```
+
+本地 dry-run 单集：
+
+```bash
+python3 -m venv .venv-align
+. .venv-align/bin/activate
+pip install -r scripts/requirements-ai-align.txt
+python scripts/ai_align_episode.py --episode-id 1 --dry-run
 ```
 
 ## 项目结构
