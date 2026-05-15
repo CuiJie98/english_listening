@@ -2,13 +2,16 @@ import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, RefreshCon
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'expo-router';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
-import { getStats, getEpisodes, type Stats } from '../../src/services/apiClient';
-import type { EpisodeSummary } from '../../src/types/episode';
+import { getStats, getEpisodes, getEpisode, type Stats } from '../../src/services/apiClient';
+import { getRecentPlayback, type RecentPlayback } from '../../src/services/storage';
+import type { Episode, EpisodeSummary } from '../../src/types/episode';
 
 export default function HomeScreen() {
   const router = useRouter();
   const [stats, setStats] = useState<Stats | null>(null);
   const [latestEpisode, setLatestEpisode] = useState<EpisodeSummary | null>(null);
+  const [continueEpisode, setContinueEpisode] = useState<Episode | null>(null);
+  const [recentPlayback, setRecentPlayback] = useState<RecentPlayback | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
@@ -22,6 +25,14 @@ export default function HomeScreen() {
       ]);
       setStats(s);
       setLatestEpisode(epData.episodes.length > 0 ? epData.episodes[0] : null);
+      const recent = await getRecentPlayback();
+      setRecentPlayback(recent);
+      if (recent) {
+        const episode = await getEpisode(recent.episodeId).catch(() => null);
+        setContinueEpisode(episode);
+      } else {
+        setContinueEpisode(null);
+      }
     } catch (err: any) {
       setError(err?.message || 'Failed to load data');
     } finally {
@@ -35,6 +46,13 @@ export default function HomeScreen() {
     setRefreshing(true);
     await loadData();
     setRefreshing(false);
+  };
+
+  const formatTime = (seconds: number) => {
+    const totalSec = Math.floor(seconds);
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    return `${min}:${sec.toString().padStart(2, '0')}`;
   };
 
   if (loading) {
@@ -88,6 +106,19 @@ export default function HomeScreen() {
           <Text style={styles.statLabel}>Due Review</Text>
         </View>
       </View>
+
+      {continueEpisode && recentPlayback ? (
+        <TouchableOpacity
+          style={styles.continueCard}
+          onPress={() => router.push(`/episode/${continueEpisode.id}`)}
+        >
+          <Text style={styles.continueLabel}>Continue Listening</Text>
+          <Text style={styles.continueTitle} numberOfLines={2}>
+            {continueEpisode.title}
+          </Text>
+          <Text style={styles.continueHint}>Resume from {formatTime(recentPlayback.position)}</Text>
+        </TouchableOpacity>
+      ) : null}
 
       {latestEpisode ? (
         <TouchableOpacity
@@ -177,6 +208,31 @@ const styles = StyleSheet.create({
     fontSize: fontSize.xs,
     color: colors.textSecondary,
     marginTop: spacing.xs,
+  },
+  continueCard: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    padding: spacing.lg,
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  continueLabel: {
+    color: colors.primary,
+    fontSize: fontSize.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    marginBottom: spacing.xs,
+  },
+  continueTitle: {
+    color: colors.text,
+    fontSize: fontSize.md,
+    fontWeight: '700',
+    marginBottom: spacing.xs,
+  },
+  continueHint: {
+    color: colors.textSecondary,
+    fontSize: fontSize.sm,
   },
   latestCard: {
     backgroundColor: colors.primary,

@@ -1,6 +1,6 @@
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Modal, TextInput, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Modal, TextInput, Alert, Platform } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { createElement, useEffect, useState, useCallback, useRef } from 'react';
 import {
   RecordingPresets,
   requestRecordingPermissionsAsync,
@@ -12,12 +12,38 @@ import {
 } from 'expo-audio';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
 import { SPEED_OPTIONS } from '../../src/constants/config';
-import { getEpisode, insertVocabCard, getAudioUrl, insertAttempt } from '../../src/services/apiClient';
-import { getPlaybackSpeed, setPlaybackSpeed, getPlaybackPosition, setPlaybackPosition } from '../../src/services/storage';
+import { getEpisode, insertVocabCard, getAudioUrl, insertAttempt, getVocabCards, updateVocabCard } from '../../src/services/apiClient';
+import {
+  getPlaybackSpeed,
+  setPlaybackSpeed,
+  getPlaybackPosition,
+  setPlaybackPosition,
+  isFavoriteEpisode,
+  toggleFavoriteEpisode,
+} from '../../src/services/storage';
+import {
+  cleanTranscriptPhrase,
+  cleanTranscriptWord,
+  parseTranscriptMarkup,
+  stripTranscriptMarkup,
+} from '../../src/utils/transcriptMarkup';
 import type { Episode } from '../../src/types/episode';
 
 type Mode = 'listen' | 'record' | 'compare';
 type ActivePlayer = 'original' | 'recording';
+type EpisodeSection = 'transcript' | 'shadowing' | 'details';
+
+function tokenizeTranscriptText(text: string): { text: string; hasTrailingSpace: boolean }[] {
+  return (text.match(/\s+|\S+\s*/g) || []).map((piece) => {
+    if (/^\s+$/.test(piece)) {
+      return { text: ' ', hasTrailingSpace: false };
+    }
+    return {
+      text: piece.replace(/\s+$/g, ''),
+      hasTrailingSpace: /\s+$/.test(piece),
+    };
+  }).filter((token) => token.text.length > 0);
+}
 
 export default function EpisodeDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -34,7 +60,10 @@ export default function EpisodeDetailScreen() {
 
   // Player state
   const [mode, setMode] = useState<Mode>('listen');
+  const [activeSection, setActiveSection] = useState<EpisodeSection>('transcript');
   const [showTranscript, setShowTranscript] = useState(true);
+  const [highlightedLine, setHighlightedLine] = useState<number | null>(null);
+  const [isFavorite, setIsFavorite] = useState(false);
   const [saved, setSaved] = useState(false);
   const [recordStartTime, setRecordStartTime] = useState(0);
   const [recordingUri, setRecordingUri] = useState<string | null>(null);
@@ -89,6 +118,13 @@ export default function EpisodeDetailScreen() {
   }, [id]);
 
   useEffect(() => { loadEpisode(); }, [loadEpisode]);
+
+  useEffect(() => {
+    if (!episode) return;
+    isFavoriteEpisode(episode.id)
+      .then(setIsFavorite)
+      .catch(() => setIsFavorite(false));
+  }, [episode]);
 
   useEffect(() => {
     getPlaybackSpeed()
@@ -157,7 +193,11 @@ export default function EpisodeDetailScreen() {
   const handleSeek = (fraction: number) => {
     if (!duration) return;
     const clamped = Math.max(0, Math.min(1, fraction));
-    getActivePlayer().seekTo(clamped * duration).catch(() => {});
+    const target = clamped * duration;
+    getActivePlayer().seekTo(target).catch(() => {});
+    if (episode && activePlayer === 'original') {
+      setPlaybackPosition(episode.id, target).catch(() => {});
+    }
   };
 
   const handleSpeedCycle = () => {
@@ -171,6 +211,9 @@ export default function EpisodeDetailScreen() {
     if (!duration) return;
     const target = Math.max(0, Math.min(duration, currentTime + seconds));
     getActivePlayer().seekTo(target).catch(() => {});
+    if (episode && activePlayer === 'original') {
+      setPlaybackPosition(episode.id, target).catch(() => {});
+    }
   };
 
   const switchToOriginal = () => {
@@ -200,6 +243,7 @@ export default function EpisodeDetailScreen() {
       recorder.record();
       setActivePlayer('original');
       setMode('record');
+      setActiveSection('shadowing');
       setSaved(false);
       setRecordingUri(null);
       setRecordStartTime(Date.now());
@@ -254,12 +298,22 @@ export default function EpisodeDetailScreen() {
     setSaved(false);
   };
 
+  const handleToggleFavorite = async () => {
+    if (!episode) return;
+    try {
+      const next = await toggleFavoriteEpisode(episode.id);
+      setIsFavorite(next);
+    } catch {
+      Alert.alert('Error', 'Failed to update favorite status');
+    }
+  };
+
   // Vocab
-  const handleWordTap = (word: string, context: string) => {
-    const cleaned = word.replace(/[^a-zA-Z'-]/g, '').trim();
+  const handleWordTap = (word: string, context: string, isPhrase = false) => {
+    const cleaned = isPhrase ? cleanTranscriptPhrase(word) : cleanTranscriptWord(word);
     if (!cleaned) return;
     setSelectedWord(cleaned);
-    setSelectedContext(context);
+    setSelectedContext(stripTranscriptMarkup(context));
     setDefinition('');
     setSaveModalVisible(true);
   };
@@ -273,15 +327,45 @@ export default function EpisodeDetailScreen() {
 
   const handleSaveWord = async () => {
     if (!episode || !selectedWord.trim()) return;
+    const word = selectedWord.trim();
+    const context = selectedContext ? stripTranscriptMarkup(selectedContext) : undefined;
+    const definitionValue = definition.trim() || undefined;
     setSaving(true);
     try {
+      const existing = (await getVocabCards()).find(
+        (card) => card.word_or_phrase.trim().toLowerCase() === word.toLowerCase()
+      );
+
+      if (existing) {
+        Alert.alert('Already saved', `"${word}" is already in your vocabulary. Update its definition or context?`, [
+          { text: 'Keep Existing', style: 'cancel' },
+          {
+            text: 'Update',
+            onPress: async () => {
+              try {
+                await updateVocabCard(existing.id, {
+                  word_or_phrase: word,
+                  context,
+                  definition: definitionValue,
+                });
+                setSaveModalVisible(false);
+                Alert.alert('Updated', `"${word}" was updated.`);
+              } catch (err: any) {
+                Alert.alert('Error', err?.message || 'Failed to update word');
+              }
+            },
+          },
+        ]);
+        return;
+      }
+
       await insertVocabCard({
-        word_or_phrase: selectedWord.trim(),
-        context: selectedContext || undefined,
-        definition: definition.trim() || undefined,
+        word_or_phrase: word,
+        context,
+        definition: definitionValue,
         episode_id: episode.id,
       });
-      Alert.alert('Saved', `"${selectedWord.trim()}" added to vocabulary.`);
+      Alert.alert('Saved', `"${word}" added to vocabulary.`);
       setSaveModalVisible(false);
     } catch (err: any) {
       Alert.alert('Error', err?.message || 'Failed to save word');
@@ -310,27 +394,120 @@ export default function EpisodeDetailScreen() {
   }
 
   const renderTextWithBold = (text: string, context: string) => {
-    const parts = text.split(/(<b>.*?<\/b>)/g);
+    const parts = parseTranscriptMarkup(text);
     let key = 0;
     return parts.map((part) => {
-      const boldMatch = /^<b>(.*?)<\/b>$/.exec(part);
-      if (boldMatch) {
-        const phrase = boldMatch[1];
-        return (
-          <Text key={key++} style={[styles.wordTap, styles.wordBold]} onPress={() => handleWordTap(phrase, context)}>
-            {phrase}
-          </Text>
-        );
+      if (part.bold) {
+        return renderTranscriptToken({
+          key: key++,
+          text: part.text,
+          context,
+          isPhrase: true,
+          bold: true,
+          hasTrailingSpace: false,
+        });
       }
-      return part.split(/(\s+)/).map((token) => {
-        if (/\s+/.test(token)) return <Text key={key++}>{token}</Text>;
-        return (
-          <Text key={key++} style={styles.wordTap} onPress={() => handleWordTap(token, context)}>
-            {token}
-          </Text>
-        );
+      return tokenizeTranscriptText(part.text).map((token) => {
+        if (!token.text.trim()) {
+          return renderTranscriptSpace(key++);
+        }
+        return renderTranscriptToken({
+          key: key++,
+          text: token.text,
+          context,
+          isPhrase: false,
+          bold: false,
+          hasTrailingSpace: token.hasTrailingSpace,
+        });
       });
     });
+  };
+
+  const renderTranscriptToken = ({
+    key,
+    text,
+    context,
+    isPhrase,
+    bold,
+    hasTrailingSpace,
+  }: {
+    key: number;
+    text: string;
+    context: string;
+    isPhrase: boolean;
+    bold: boolean;
+    hasTrailingSpace: boolean;
+  }) => {
+    const onPress = () => handleWordTap(text, context, isPhrase);
+    const displayText = hasTrailingSpace ? `${text} ` : text;
+    if (Platform.OS === 'web') {
+      return createElement('span', {
+        key,
+        role: 'button',
+        tabIndex: 0,
+        'aria-label': `Save ${text}`,
+        'data-transcript-token': text,
+        'data-transcript-kind': isPhrase ? 'phrase' : 'word',
+        onClick: (event: { stopPropagation?: () => void }) => {
+          event.stopPropagation?.();
+          onPress();
+        },
+        onKeyDown: (event: { key?: string; preventDefault?: () => void; stopPropagation?: () => void }) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault?.();
+            event.stopPropagation?.();
+            onPress();
+          }
+        },
+        style: {
+          cursor: 'pointer',
+          color: bold ? colors.primary : colors.text,
+          fontWeight: bold ? 700 : 400,
+          textDecorationLine: bold ? 'underline' : 'none',
+          backgroundColor: bold ? colors.primaryLight + '18' : 'transparent',
+        },
+      }, displayText);
+    }
+    return (
+      <Text
+        key={key}
+        style={[styles.wordTap, bold && styles.wordBold]}
+        onPress={onPress}
+      >
+        {displayText}
+      </Text>
+    );
+  };
+
+  const renderTranscriptSpace = (key: number) => {
+    if (Platform.OS === 'web') {
+      return createElement('span', { key, style: { whiteSpace: 'pre' } }, ' ');
+    }
+    return <Text key={key}> </Text>;
+  };
+
+  const renderHighlightedContext = () => {
+    const context = stripTranscriptMarkup(selectedContext);
+    const phrase = selectedWord.trim();
+    if (!context || !phrase) {
+      return <Text style={styles.modalContext}>&ldquo;{context}&rdquo;</Text>;
+    }
+
+    const start = context.toLowerCase().indexOf(phrase.toLowerCase());
+    if (start < 0) {
+      return <Text style={styles.modalContext}>&ldquo;{context}&rdquo;</Text>;
+    }
+
+    const end = start + phrase.length;
+    return (
+      <Text style={styles.modalContext}>
+        {'"'}
+        {context.slice(0, start)}
+        <Text style={styles.modalContextHighlight}>{context.slice(start, end)}</Text>
+        {context.slice(end)}
+        {'"'}
+      </Text>
+    );
   };
 
   const formatDate = (ts: number | null) => {
@@ -343,53 +520,96 @@ export default function EpisodeDetailScreen() {
   };
 
   const progress = duration > 0 ? currentTime / duration : 0;
+  const transcriptLineCount = episode.transcript_segments && episode.transcript_segments.length > 0
+    ? episode.transcript_segments.length
+    : (episode.transcript || '').split('\n').filter((line) => line.trim()).length;
+
+  const handleCycleHighlightedLine = () => {
+    if (transcriptLineCount === 0) return;
+    setHighlightedLine((current) => {
+      if (current === null) return 0;
+      if (current + 1 >= transcriptLineCount) return null;
+      return current + 1;
+    });
+  };
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>{episode.title}</Text>
-      <Text style={styles.date}>{formatDate(episode.published_at)}</Text>
+      <View style={styles.playerPanel}>
+        <View style={styles.titleRow}>
+          <View style={styles.titleContent}>
+            <Text style={styles.title}>{episode.title}</Text>
+            <Text style={styles.date}>{formatDate(episode.published_at)}</Text>
+          </View>
+          <TouchableOpacity
+            style={[styles.favoriteButton, isFavorite && styles.favoriteButtonActive]}
+            onPress={handleToggleFavorite}
+          >
+            <Text style={[styles.favoriteButtonText, isFavorite && styles.favoriteButtonTextActive]}>
+              {isFavorite ? 'Saved' : 'Save'}
+            </Text>
+          </TouchableOpacity>
+        </View>
 
-      {/* Player */}
-      <View
-        style={styles.progressBar}
-        onLayout={(e) => setProgressBarWidth(e.nativeEvent.layout.width)}
-      >
-        <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
-        <TouchableOpacity
-          style={styles.progressTouch}
-          onPress={(e) => handleSeek(e.nativeEvent.locationX / progressBarWidth)}
-        />
-      </View>
-      <View style={styles.timeRow}>
-        <Text style={styles.timeText}>{formatTime(currentTime)}</Text>
-        <Text style={styles.timeText}>{formatTime(duration)}</Text>
+        <View
+          style={styles.progressBar}
+          onLayout={(e) => setProgressBarWidth(e.nativeEvent.layout.width)}
+        >
+          <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
+          <TouchableOpacity
+            style={styles.progressTouch}
+            onPress={(e) => handleSeek(e.nativeEvent.locationX / progressBarWidth)}
+          />
+        </View>
+        <View style={styles.timeRow}>
+          <Text style={styles.timeText}>{formatTime(currentTime)}</Text>
+          <Text style={styles.timeText}>{formatTime(duration)}</Text>
+        </View>
+
+        <View style={styles.controlRow}>
+          <TouchableOpacity style={styles.skipButton} onPress={() => handleSkip(-15)}>
+            <Text style={styles.skipText}>-15</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.skipButton} onPress={() => handleSkip(-3)}>
+            <Text style={styles.skipText}>-3</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.controlButton} onPress={handlePlayPause}>
+            <Text style={styles.controlIcon}>{isPlaying ? 'Pause' : 'Play'}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.skipButton} onPress={() => handleSkip(3)}>
+            <Text style={styles.skipText}>+3</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.skipButton} onPress={() => handleSkip(15)}>
+            <Text style={styles.skipText}>+15</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.speedRow}>
+          <TouchableOpacity style={styles.speedButton} onPress={handleSpeedCycle}>
+            <Text style={styles.speedText}>{playbackRate}x</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
-      <View style={styles.controlRow}>
-        <TouchableOpacity style={styles.skipButton} onPress={() => handleSkip(-15)}>
-          <Text style={styles.skipText}>-15</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.skipButton} onPress={() => handleSkip(-3)}>
-          <Text style={styles.skipText}>-3</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.controlButton} onPress={handlePlayPause}>
-          <Text style={styles.controlIcon}>{isPlaying ? '⏸' : '▶'}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.skipButton} onPress={() => handleSkip(3)}>
-          <Text style={styles.skipText}>+3</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.skipButton} onPress={() => handleSkip(15)}>
-          <Text style={styles.skipText}>+15</Text>
-        </TouchableOpacity>
+      <View style={styles.sectionTabs}>
+        {[
+          { key: 'transcript', label: 'Transcript' },
+          { key: 'shadowing', label: 'Shadowing' },
+          { key: 'details', label: 'Details' },
+        ].map((tab) => (
+          <TouchableOpacity
+            key={tab.key}
+            style={[styles.sectionTab, activeSection === tab.key && styles.sectionTabActive]}
+            onPress={() => setActiveSection(tab.key as EpisodeSection)}
+          >
+            <Text style={[styles.sectionTabText, activeSection === tab.key && styles.sectionTabTextActive]}>
+              {tab.label}
+            </Text>
+          </TouchableOpacity>
+        ))}
       </View>
 
-      <View style={styles.speedRow}>
-        <TouchableOpacity style={styles.speedButton} onPress={handleSpeedCycle}>
-          <Text style={styles.speedText}>{playbackRate}x</Text>
-        </TouchableOpacity>
-      </View>
-
-      {mode === 'listen' && (
+      {activeSection === 'shadowing' && mode === 'listen' && (
         <View style={styles.section}>
           <TouchableOpacity style={styles.recordStartButton} onPress={handleStartRecording}>
             <Text style={styles.recordStartText}>Start Shadowing</Text>
@@ -397,7 +617,7 @@ export default function EpisodeDetailScreen() {
         </View>
       )}
 
-      {mode === 'record' && (
+      {activeSection === 'shadowing' && mode === 'record' && (
         <View style={styles.section}>
           {recorderState.isRecording ? (
             <Text style={styles.recordLabel}>
@@ -418,7 +638,7 @@ export default function EpisodeDetailScreen() {
         </View>
       )}
 
-      {mode === 'compare' && (
+      {activeSection === 'shadowing' && mode === 'compare' && (
         <View style={styles.section}>
           <Text style={styles.compareLabel}>Compare your recording</Text>
           <View style={styles.compareRow}>
@@ -452,7 +672,7 @@ export default function EpisodeDetailScreen() {
       )}
 
       {/* Description */}
-      {episode.description && (
+      {activeSection === 'details' && episode.description && (
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Description</Text>
           <Text style={styles.description}>{episode.description}</Text>
@@ -460,10 +680,20 @@ export default function EpisodeDetailScreen() {
       )}
 
       {/* Transcript */}
-      <View style={styles.section}>
+      {activeSection === 'transcript' && <View style={styles.section}>
         <View style={styles.transcriptHeader}>
           <Text style={styles.sectionTitle}>Transcript</Text>
           <View style={styles.transcriptActions}>
+            {showTranscript && transcriptLineCount > 0 ? (
+              <TouchableOpacity
+                style={styles.transcriptToggle}
+                onPress={handleCycleHighlightedLine}
+              >
+                <Text style={styles.transcriptToggleText}>
+                  {highlightedLine === null ? 'Focus' : 'Next'}
+                </Text>
+              </TouchableOpacity>
+            ) : null}
             <TouchableOpacity
               style={styles.transcriptToggle}
               onPress={() => setShowTranscript(!showTranscript)}
@@ -489,11 +719,16 @@ export default function EpisodeDetailScreen() {
         </View>
         {showTranscript && (
           <>
-            <Text style={styles.hintText}>Tap a word to save it</Text>
+            <Text style={styles.hintText}>
+              Tap a word or highlighted phrase to save it. Use Focus to mark a line.
+            </Text>
             {episode.transcript_segments && episode.transcript_segments.length > 0 ? (
               <View style={styles.transcriptContainer}>
                 {episode.transcript_segments.map((seg, i) => (
-                  <View key={i} style={styles.transcriptLine}>
+                  <View
+                    key={i}
+                    style={[styles.transcriptLine, highlightedLine === i && styles.transcriptLineActive]}
+                  >
                     <Text style={styles.transcriptText}>
                       {seg.speaker && (
                         <Text style={styles.transcriptSpeaker}>{seg.speaker}: </Text>
@@ -509,7 +744,10 @@ export default function EpisodeDetailScreen() {
                   const trimmed = line.trim();
                   if (!trimmed) return null;
                   return (
-                    <View key={i} style={styles.transcriptLine}>
+                    <View
+                      key={i}
+                      style={[styles.transcriptLine, highlightedLine === i && styles.transcriptLineActive]}
+                    >
                       <Text style={styles.transcriptText}>
                         {renderTextWithBold(trimmed, trimmed)}
                       </Text>
@@ -531,7 +769,7 @@ export default function EpisodeDetailScreen() {
             )}
           </>
         )}
-      </View>
+      </View>}
 
       {/* Vocab modal */}
       <Modal visible={saveModalVisible} transparent animationType="slide">
@@ -561,7 +799,7 @@ export default function EpisodeDetailScreen() {
             {selectedContext ? (
               <>
                 <Text style={styles.modalLabel}>Context</Text>
-                <Text style={styles.modalContext}>&ldquo;{selectedContext}&rdquo;</Text>
+                {renderHighlightedContext()}
               </>
             ) : null}
 
@@ -602,6 +840,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: spacing.lg,
   },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
+  titleContent: {
+    flex: 1,
+  },
   title: {
     fontSize: fontSize.xl,
     fontWeight: '700',
@@ -613,7 +859,39 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginBottom: spacing.lg,
   },
+  favoriteButton: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    minWidth: 64,
+    alignItems: 'center',
+  },
+  favoriteButtonActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  favoriteButtonText: {
+    color: colors.textSecondary,
+    fontSize: fontSize.xs,
+    fontWeight: '700',
+  },
+  favoriteButtonTextActive: {
+    color: colors.surface,
+  },
   // Player
+  playerPanel: {
+    backgroundColor: colors.background,
+    paddingBottom: spacing.md,
+    marginBottom: spacing.md,
+    ...(Platform.OS === 'web' ? {
+      position: 'sticky' as any,
+      top: 0,
+      zIndex: 20,
+    } : null),
+  },
   progressBar: {
     height: 4,
     backgroundColor: colors.border,
@@ -676,7 +954,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   controlIcon: {
-    fontSize: 28,
+    fontSize: fontSize.sm,
     color: colors.surface,
     fontWeight: '700',
   },
@@ -702,6 +980,34 @@ const styles = StyleSheet.create({
   // Shadowing
   section: {
     marginBottom: spacing.lg,
+  },
+  sectionTabs: {
+    flexDirection: 'row',
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: borderRadius.md,
+    padding: 4,
+    marginBottom: spacing.lg,
+  },
+  sectionTab: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+    borderRadius: borderRadius.sm,
+  },
+  sectionTabActive: {
+    backgroundColor: colors.surface,
+    shadowColor: colors.text,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 3,
+  },
+  sectionTabText: {
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  sectionTabTextActive: {
+    color: colors.text,
   },
   recordStartButton: {
     backgroundColor: colors.error,
@@ -864,8 +1170,14 @@ const styles = StyleSheet.create({
   },
   transcriptLine: {
     paddingVertical: spacing.xs + 2,
+    paddingHorizontal: spacing.xs,
+    borderRadius: borderRadius.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
+  },
+  transcriptLineActive: {
+    backgroundColor: colors.primaryLight + '18',
+    borderBottomColor: colors.primaryLight,
   },
   transcriptText: {
     fontSize: fontSize.md,
@@ -873,6 +1185,8 @@ const styles = StyleSheet.create({
     lineHeight: 24,
   },
   transcriptSpeaker: {
+    fontSize: fontSize.md,
+    lineHeight: 24,
     fontWeight: '700',
     color: colors.primary,
   },
@@ -881,6 +1195,9 @@ const styles = StyleSheet.create({
   },
   wordBold: {
     fontWeight: '700',
+    color: colors.primary,
+    textDecorationLine: 'underline',
+    backgroundColor: colors.primaryLight + '18',
   },
   noTranscript: {
     backgroundColor: colors.surfaceAlt,
@@ -951,6 +1268,11 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontStyle: 'italic',
     lineHeight: 20,
+  },
+  modalContextHighlight: {
+    color: colors.text,
+    backgroundColor: colors.primaryLight + '30',
+    fontWeight: '700',
   },
   modalActions: {
     flexDirection: 'row',

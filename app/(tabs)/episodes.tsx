@@ -1,11 +1,13 @@
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, FlatList, RefreshControl } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, FlatList, RefreshControl, TextInput } from 'react-native';
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
 import { getEpisodes, getAttempts, type AttemptWithEpisode } from '../../src/services/apiClient';
+import { getFavoriteEpisodeIds } from '../../src/services/storage';
 import type { EpisodeSummary } from '../../src/types/episode';
 
 const PAGE_SIZE = 20;
+type EpisodeFilter = 'all' | 'unlistened' | 'listened' | 'saved' | 'withText' | 'noText';
 
 export default function EpisodesScreen() {
   const router = useRouter();
@@ -17,8 +19,29 @@ export default function EpisodesScreen() {
   const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [attempts, setAttempts] = useState<AttemptWithEpisode[]>([]);
+  const [favoriteIds, setFavoriteIds] = useState<number[]>([]);
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState<EpisodeFilter>('all');
 
   const listenedIds = useMemo(() => new Set(attempts.map((a) => a.episode_id)), [attempts]);
+  const favoriteIdSet = useMemo(() => new Set(favoriteIds), [favoriteIds]);
+  const practicedIds = useMemo(
+    () => new Set(attempts.filter((a) => a.type === 'shadow').map((a) => a.episode_id)),
+    [attempts]
+  );
+  const visibleEpisodes = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return episodes.filter((episode) => {
+      const hasTranscript = Boolean(episode.has_transcript);
+      if (filter === 'listened' && !listenedIds.has(episode.id)) return false;
+      if (filter === 'unlistened' && listenedIds.has(episode.id)) return false;
+      if (filter === 'saved' && !favoriteIdSet.has(episode.id)) return false;
+      if (filter === 'withText' && !hasTranscript) return false;
+      if (filter === 'noText' && hasTranscript) return false;
+      if (!needle) return true;
+      return episode.title.toLowerCase().includes(needle);
+    });
+  }, [episodes, favoriteIdSet, filter, listenedIds, query]);
 
   const loadEpisodes = useCallback(async (nextPage = 1, append = false) => {
     try {
@@ -42,14 +65,30 @@ export default function EpisodesScreen() {
     } catch {}
   }, []);
 
+  const loadFavorites = useCallback(async () => {
+    try {
+      setFavoriteIds(await getFavoriteEpisodeIds());
+    } catch {
+      setFavoriteIds([]);
+    }
+  }, []);
+
   useEffect(() => {
     loadEpisodes();
     loadAttempts();
-  }, [loadEpisodes, loadAttempts]);
+    loadFavorites();
+  }, [loadEpisodes, loadAttempts, loadFavorites]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadAttempts();
+      loadFavorites();
+    }, [loadAttempts, loadFavorites])
+  );
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    await Promise.all([loadEpisodes(1, false), loadAttempts()]);
+    await Promise.all([loadEpisodes(1, false), loadAttempts(), loadFavorites()]);
     setRefreshing(false);
   };
 
@@ -82,50 +121,52 @@ export default function EpisodesScreen() {
     return `${min}:${sec.toString().padStart(2, '0')}`;
   };
 
-  const renderEpisode = ({ item }: { item: EpisodeSummary }) => (
-    <TouchableOpacity
-      style={styles.episodeCard}
-      onPress={() => router.push(`/episode/${item.id}`)}
-      activeOpacity={0.7}
-    >
-      <View style={styles.episodeHeader}>
-        <Text style={styles.episodeTitle} numberOfLines={2}>
-          {item.title}
-        </Text>
+  const renderEpisode = ({ item }: { item: EpisodeSummary }) => {
+    const hasTranscript = Boolean(item.has_transcript);
+    const listened = listenedIds.has(item.id);
+    const practiced = practicedIds.has(item.id);
+    const saved = favoriteIdSet.has(item.id);
+
+    return (
+      <TouchableOpacity
+        style={styles.episodeCard}
+        onPress={() => router.push(`/episode/${item.id}`)}
+        activeOpacity={0.7}
+      >
+        <View style={styles.episodeHeader}>
+          <Text style={styles.episodeTitle} numberOfLines={2}>
+            {item.title}
+          </Text>
+          <Text style={styles.chevron}>›</Text>
+        </View>
         <View style={styles.badges}>
-          {listenedIds.has(item.id) && (
-            <View style={[styles.badge, styles.badgeListened]}>
-              <Text style={styles.badgeText}>✓</Text>
+          <View style={[styles.badge, listened ? styles.badgeListened : styles.badgeNeutral]}>
+            <Text style={styles.badgeText}>{practiced ? 'Practiced' : listened ? 'Listened' : 'New'}</Text>
+          </View>
+          {saved ? (
+            <View style={[styles.badge, styles.badgeSaved]}>
+              <Text style={styles.badgeText}>Saved</Text>
             </View>
-          )}
-          {item.has_transcript && (
+          ) : null}
+          {hasTranscript ? (
             <View style={[styles.badge, styles.badgeSuccess]}>
               <Text style={styles.badgeText}>Text</Text>
             </View>
-          )}
-          {!item.has_transcript && item.fetch_status === 'failed' && (
+          ) : item.fetch_status === 'failed' ? (
             <View style={[styles.badge, styles.badgeWarning]}>
               <Text style={styles.badgeText}>No Text</Text>
             </View>
-          )}
+          ) : null}
         </View>
-      </View>
-      <View style={styles.episodeMeta}>
-        <Text style={styles.metaText}>{formatDate(item.published_at)}</Text>
-        {item.duration_sec ? (
-          <Text style={styles.metaText}>{formatDuration(item.duration_sec)}</Text>
-        ) : null}
-        <TouchableOpacity
-          style={styles.detailButton}
-          onPress={() => router.push(`/episode/${item.id}`)}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        >
-          <Text style={styles.detailButtonText}>i</Text>
-        </TouchableOpacity>
-        <Text style={styles.chevron}>›</Text>
-      </View>
-    </TouchableOpacity>
-  );
+        <View style={styles.episodeMeta}>
+          <Text style={styles.metaText}>{formatDate(item.published_at)}</Text>
+          {item.duration_sec ? (
+            <Text style={styles.metaText}>{formatDuration(item.duration_sec)}</Text>
+          ) : null}
+        </View>
+      </TouchableOpacity>
+    );
+  };
 
   if (loading) {
     return (
@@ -155,14 +196,49 @@ export default function EpisodesScreen() {
         </View>
       ) : (
         <FlatList
-          data={episodes}
+          data={visibleEpisodes}
           renderItem={renderEpisode}
           keyExtractor={(item) => item.id.toString()}
           contentContainerStyle={styles.list}
           onEndReached={handleLoadMore}
           onEndReachedThreshold={0.5}
           ListHeaderComponent={
-            attempts.length > 0 ? (
+            <>
+              <View style={styles.filters}>
+                <TextInput
+                  style={styles.searchInput}
+                  value={query}
+                  onChangeText={setQuery}
+                  placeholder="Search episodes"
+                  autoCapitalize="none"
+                />
+                <View style={styles.filterRow}>
+                  {[
+                    { key: 'all', label: 'All' },
+                    { key: 'unlistened', label: 'New' },
+                    { key: 'listened', label: 'Listened' },
+                    { key: 'saved', label: 'Saved' },
+                    { key: 'withText', label: 'Text' },
+                    { key: 'noText', label: 'No Text' },
+                  ].map((item) => (
+                    <TouchableOpacity
+                      key={item.key}
+                      style={[styles.filterChip, filter === item.key && styles.filterChipActive]}
+                      onPress={() => setFilter(item.key as EpisodeFilter)}
+                    >
+                      <Text style={[styles.filterChipText, filter === item.key && styles.filterChipTextActive]}>
+                        {item.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+              {visibleEpisodes.length === 0 ? (
+                <View style={styles.emptyInline}>
+                  <Text style={styles.emptyHint}>No episodes match this filter</Text>
+                </View>
+              ) : null}
+              {attempts.length > 0 ? (
               <View style={styles.historySection}>
                 <Text style={styles.historyTitle}>Recent Practice</Text>
                 {attempts.map((item) => (
@@ -184,7 +260,8 @@ export default function EpisodesScreen() {
                   </TouchableOpacity>
                 ))}
               </View>
-            ) : null
+              ) : null}
+            </>
           }
           ListFooterComponent={
             loadingMore ? (
@@ -220,6 +297,52 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
     alignItems: 'center',
   },
+  filters: {
+    marginBottom: spacing.md,
+  },
+  searchInput: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    fontSize: fontSize.md,
+    color: colors.text,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: spacing.sm,
+  },
+  filterRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+  },
+  filterChip: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  filterChipActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  filterChipText: {
+    fontSize: fontSize.xs,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  filterChipTextActive: {
+    color: colors.surface,
+  },
+  emptyInline: {
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    alignItems: 'center',
+    marginBottom: spacing.md,
+  },
   episodeCard: {
     backgroundColor: colors.surface,
     borderRadius: borderRadius.md,
@@ -241,6 +364,8 @@ const styles = StyleSheet.create({
   badges: {
     flexDirection: 'row',
     gap: spacing.xs,
+    flexWrap: 'wrap',
+    marginTop: spacing.sm,
   },
   badge: {
     paddingHorizontal: spacing.sm,
@@ -255,6 +380,12 @@ const styles = StyleSheet.create({
   },
   badgeListened: {
     backgroundColor: colors.primaryLight + '30',
+  },
+  badgeSaved: {
+    backgroundColor: colors.warningLight,
+  },
+  badgeNeutral: {
+    backgroundColor: colors.surfaceAlt,
   },
   badgeText: {
     fontSize: fontSize.xs,
@@ -274,24 +405,7 @@ const styles = StyleSheet.create({
   chevron: {
     fontSize: 20,
     color: colors.textMuted,
-    marginLeft: spacing.xs,
-  },
-  detailButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: colors.surfaceAlt,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: 'auto',
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  detailButtonText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: colors.textSecondary,
-    fontStyle: 'italic',
+    marginLeft: spacing.sm,
   },
   emptyText: {
     fontSize: fontSize.lg,

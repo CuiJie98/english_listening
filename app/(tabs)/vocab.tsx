@@ -1,5 +1,5 @@
 import { View, Text, StyleSheet, TouchableOpacity, Alert, FlatList, ActivityIndicator, Modal, TextInput } from 'react-native';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { colors, spacing, fontSize, borderRadius } from '../../src/constants/theme';
 import {
   getVocabCards,
@@ -9,6 +9,16 @@ import {
   submitReview,
   type VocabWithReview,
 } from '../../src/services/apiClient';
+
+type CardView = 'all' | 'due';
+type ReviewSummary = {
+  total: number;
+  again: number;
+  hard: number;
+  good: number;
+  easy: number;
+  nextReview: number | null;
+};
 
 export default function VocabScreen() {
   const [cards, setCards] = useState<VocabWithReview[]>([]);
@@ -24,6 +34,28 @@ export default function VocabScreen() {
   const [editWord, setEditWord] = useState('');
   const [editDefinition, setEditDefinition] = useState('');
   const [editContext, setEditContext] = useState('');
+  const [query, setQuery] = useState('');
+  const [cardView, setCardView] = useState<CardView>('all');
+  const [reviewSummary, setReviewSummary] = useState<ReviewSummary | null>(null);
+  const [reviewStats, setReviewStats] = useState<ReviewSummary>({
+    total: 0,
+    again: 0,
+    hard: 0,
+    good: 0,
+    easy: 0,
+    nextReview: null,
+  });
+
+  const visibleCards = useMemo(() => {
+    const source = cardView === 'due' ? dueCards : cards;
+    const needle = query.trim().toLowerCase();
+    if (!needle) return source;
+    return source.filter((card) => (
+      card.word_or_phrase.toLowerCase().includes(needle) ||
+      (card.definition || '').toLowerCase().includes(needle) ||
+      (card.context || '').toLowerCase().includes(needle)
+    ));
+  }, [cardView, cards, dueCards, query]);
 
   const loadCards = useCallback(async () => {
     try {
@@ -47,6 +79,15 @@ export default function VocabScreen() {
 
   const handleStartReview = () => {
     if (dueCards.length === 0) return;
+    setReviewSummary(null);
+    setReviewStats({
+      total: 0,
+      again: 0,
+      hard: 0,
+      good: 0,
+      easy: 0,
+      nextReview: null,
+    });
     setReviewMode(true);
     setCurrentIndex(0);
     setFlipped(false);
@@ -63,12 +104,23 @@ export default function VocabScreen() {
 
     setSubmitting(true);
     try {
-      await submitReview(card.id, quality);
+      const result = await submitReview(card.id, quality);
+      const nextStats = {
+        ...reviewStats,
+        total: reviewStats.total + 1,
+        again: reviewStats.again + (quality === 1 ? 1 : 0),
+        hard: reviewStats.hard + (quality === 3 ? 1 : 0),
+        good: reviewStats.good + (quality === 4 ? 1 : 0),
+        easy: reviewStats.easy + (quality === 5 ? 1 : 0),
+        nextReview: result.next_review,
+      };
+      setReviewStats(nextStats);
       if (currentIndex + 1 < dueCards.length) {
         setCurrentIndex(currentIndex + 1);
         setFlipped(false);
       } else {
         setReviewMode(false);
+        setReviewSummary(nextStats);
         await loadCards();
       }
     } catch (err: any) {
@@ -225,6 +277,46 @@ export default function VocabScreen() {
         </TouchableOpacity>
       )}
 
+      {reviewSummary && (
+        <View style={styles.summaryCard}>
+          <Text style={styles.summaryTitle}>Review complete</Text>
+          <Text style={styles.summaryText}>
+            {reviewSummary.total} reviewed · Again {reviewSummary.again} · Hard {reviewSummary.hard} · Good {reviewSummary.good} · Easy {reviewSummary.easy}
+          </Text>
+          {reviewSummary.nextReview ? (
+            <Text style={styles.summaryHint}>
+              Next review from {new Date(reviewSummary.nextReview * 1000).toLocaleDateString()}
+            </Text>
+          ) : null}
+        </View>
+      )}
+
+      <View style={styles.controls}>
+        <TextInput
+          style={styles.searchInput}
+          value={query}
+          onChangeText={setQuery}
+          placeholder="Search words, definitions, context"
+          autoCapitalize="none"
+        />
+        <View style={styles.viewSwitch}>
+          {[
+            { key: 'all', label: 'All' },
+            { key: 'due', label: `Due (${dueCards.length})` },
+          ].map((item) => (
+            <TouchableOpacity
+              key={item.key}
+              style={[styles.viewOption, cardView === item.key && styles.viewOptionActive]}
+              onPress={() => setCardView(item.key as CardView)}
+            >
+              <Text style={[styles.viewOptionText, cardView === item.key && styles.viewOptionTextActive]}>
+                {item.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+
       {cards.length === 0 ? (
         <View style={styles.emptyState}>
           <Text style={styles.emptyText}>No vocabulary yet</Text>
@@ -234,11 +326,12 @@ export default function VocabScreen() {
         </View>
       ) : (
         <FlatList
-          data={cards}
+          data={visibleCards}
           keyExtractor={(item) => item.id.toString()}
           renderItem={({ item }) => (
             <TouchableOpacity
               style={styles.vocabCard}
+              onPress={() => handleCardAction(item)}
               onLongPress={() => handleCardAction(item)}
             >
               <Text style={styles.vocabWord}>{item.word_or_phrase}</Text>
@@ -255,6 +348,11 @@ export default function VocabScreen() {
             </TouchableOpacity>
           )}
           contentContainerStyle={styles.cardList}
+          ListEmptyComponent={
+            <View style={styles.emptyInline}>
+              <Text style={styles.emptyHint}>No cards match this view</Text>
+            </View>
+          }
         />
       )}
 
@@ -355,9 +453,74 @@ const styles = StyleSheet.create({
     fontSize: fontSize.sm,
     fontWeight: '500',
   },
+  summaryCard: {
+    backgroundColor: colors.successLight,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  summaryTitle: {
+    fontSize: fontSize.md,
+    fontWeight: '700',
+    color: colors.text,
+    marginBottom: spacing.xs,
+  },
+  summaryText: {
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
+    lineHeight: 20,
+  },
+  summaryHint: {
+    fontSize: fontSize.xs,
+    color: colors.textMuted,
+    marginTop: spacing.xs,
+  },
+  controls: {
+    marginBottom: spacing.md,
+  },
+  searchInput: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    fontSize: fontSize.md,
+    color: colors.text,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: spacing.sm,
+  },
+  viewSwitch: {
+    flexDirection: 'row',
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: borderRadius.md,
+    padding: 4,
+  },
+  viewOption: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.sm,
+  },
+  viewOptionActive: {
+    backgroundColor: colors.surface,
+  },
+  viewOptionText: {
+    color: colors.textSecondary,
+    fontSize: fontSize.sm,
+    fontWeight: '600',
+  },
+  viewOptionTextActive: {
+    color: colors.text,
+  },
   emptyState: {
     flex: 1,
     justifyContent: 'center',
+    alignItems: 'center',
+  },
+  emptyInline: {
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: borderRadius.md,
+    padding: spacing.lg,
     alignItems: 'center',
   },
   emptyText: {
