@@ -15,7 +15,15 @@ import {
   updateEpisodeFetchStatus,
   updateEpisodeAudioUrl,
   getPendingEpisodes,
+  updateEpisodeAlignmentWindow,
+  updateEpisodeAlignedSegments,
+  getEpisodesNeedingAlignment,
 } from './db/queries';
+import {
+  alignTranscriptSegments,
+  parseTranscriptSegments,
+  resolveAlignmentWindow,
+} from './services/transcriptAligner';
 import type { Env } from './types';
 
 const router = new Router();
@@ -43,6 +51,107 @@ router.post('/api/attempts', (req, params, env) => handleCreateAttempt(req, para
 
 // Stats
 router.get('/api/stats', (req, params, env) => handleGetStats(req, params, env));
+
+// Alignment admin endpoints
+router.post('/api/episodes/:id/alignment-window', async (req, params, env) => {
+  const adminError = requireAdmin(req, env);
+  if (adminError) return adminError;
+
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) return Response.json({ error: 'Invalid ID' }, { status: 400 });
+
+  const ep = await getEpisode(env.DB, id);
+  if (!ep) return Response.json({ error: 'Not found' }, { status: 404 });
+
+  let body: any = {};
+  try {
+    body = await req.json();
+  } catch {
+    return Response.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
+
+  const startInput = Object.prototype.hasOwnProperty.call(body, 'start')
+    ? body.start
+    : Object.prototype.hasOwnProperty.call(body, 'transcript_start_sec')
+      ? body.transcript_start_sec
+      : ep.transcript_start_sec;
+  const endInput = Object.prototype.hasOwnProperty.call(body, 'end')
+    ? body.end
+    : Object.prototype.hasOwnProperty.call(body, 'transcript_end_sec')
+      ? body.transcript_end_sec
+      : ep.transcript_end_sec;
+  const start = readOptionalSeconds(startInput);
+  const end = readOptionalSeconds(endInput);
+  if (start.invalid || end.invalid) {
+    return Response.json({ error: 'start and end must be numbers or null' }, { status: 400 });
+  }
+  if (start.value !== null && start.value < 0) {
+    return Response.json({ error: 'start must be greater than or equal to 0' }, { status: 400 });
+  }
+  if (start.value !== null && end.value !== null && end.value <= start.value) {
+    return Response.json({ error: 'end must be greater than start' }, { status: 400 });
+  }
+  if (ep.duration_sec !== null && end.value !== null && end.value > ep.duration_sec + 0.5) {
+    return Response.json({ error: 'end cannot exceed episode duration' }, { status: 400 });
+  }
+
+  await updateEpisodeAlignmentWindow(env.DB, id, start.value, end.value);
+  return Response.json({
+    ok: true,
+    episodeId: id,
+    transcript_start_sec: start.value,
+    transcript_end_sec: end.value,
+  });
+});
+
+router.post('/api/episodes/:id/align', async (req, params, env) => {
+  const adminError = requireAdmin(req, env);
+  if (adminError) return adminError;
+
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) return Response.json({ error: 'Invalid ID' }, { status: 400 });
+
+  const result = await alignEpisode(env, id);
+  return Response.json(result.body, { status: result.status });
+});
+
+router.post('/api/episodes/align-batch', async (req, _params, env) => {
+  const adminError = requireAdmin(req, env);
+  if (adminError) return adminError;
+
+  let limit = 20;
+  try {
+    const body: any = await req.json();
+    if (body?.limit !== undefined) {
+      const parsed = Number(body.limit);
+      if (Number.isFinite(parsed)) limit = parsed;
+    }
+  } catch {
+    // Empty body is fine.
+  }
+
+  const episodes = await getEpisodesNeedingAlignment(env.DB, limit);
+  const log: string[] = [];
+  let success = 0;
+
+  for (const ep of episodes) {
+    const result = await alignEpisode(env, ep.id);
+    if (result.status === 200) {
+      success++;
+      log.push(`OK: ${ep.id} (${result.body.segmentCount} segments)`);
+    } else {
+      log.push(`SKIP: ${ep.id} (${result.body.error})`);
+    }
+  }
+
+  return Response.json({
+    ok: true,
+    processed: episodes.length,
+    success,
+    skipped: episodes.length - success,
+    log,
+  });
+});
 
 // Debug: check audio URL extraction for an episode
 router.get('/api/debug/audio/:id', async (_req, params, env) => {
@@ -257,6 +366,57 @@ function requireAdmin(request: Request, env: Env): Response | null {
     return Response.json({ error: 'Forbidden' }, { status: 403 });
   }
   return null;
+}
+
+function readOptionalSeconds(value: unknown): { value: number | null; invalid: boolean } {
+  if (value === undefined || value === null || value === '') {
+    return { value: null, invalid: false };
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return { value: null, invalid: true };
+  }
+  return { value: Math.round(parsed * 100) / 100, invalid: false };
+}
+
+async function alignEpisode(env: Env, id: number): Promise<{ status: number; body: Record<string, any> }> {
+  const ep = await getEpisode(env.DB, id);
+  if (!ep) return { status: 404, body: { error: 'Not found' } };
+
+  const segments = parseTranscriptSegments(ep.transcript_segments);
+  if (segments.length === 0) {
+    return { status: 400, body: { error: 'Episode has no transcript segments' } };
+  }
+
+  const window = resolveAlignmentWindow(ep);
+  if (!window) {
+    return {
+      status: 400,
+      body: {
+        error: 'Episode needs a duration or transcript_end_sec before alignment',
+        transcript_start_sec: ep.transcript_start_sec,
+        transcript_end_sec: ep.transcript_end_sec,
+        duration_sec: ep.duration_sec,
+      },
+    };
+  }
+
+  const aligned = alignTranscriptSegments(segments, window);
+  await updateEpisodeAlignedSegments(env.DB, id, JSON.stringify(aligned));
+
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      episodeId: id,
+      segmentCount: aligned.length,
+      window,
+      firstSegment: aligned[0] ? { start: aligned[0].start, end: aligned[0].end } : null,
+      lastSegment: aligned[aligned.length - 1]
+        ? { start: aligned[aligned.length - 1].start, end: aligned[aligned.length - 1].end }
+        : null,
+    },
+  };
 }
 
 // CORS headers

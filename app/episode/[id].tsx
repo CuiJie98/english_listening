@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Modal, TextInput, Alert, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Modal, TextInput, Alert, Platform, Pressable } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
 import { createElement, useEffect, useState, useCallback, useRef } from 'react';
 import {
@@ -28,6 +28,7 @@ import {
   stripTranscriptMarkup,
 } from '../../src/utils/transcriptMarkup';
 import type { Episode } from '../../src/types/episode';
+import type { TranscriptSegment } from '../../src/types/episode';
 
 type Mode = 'listen' | 'record' | 'compare';
 type ActivePlayer = 'original' | 'recording';
@@ -73,6 +74,7 @@ export default function EpisodeDetailScreen() {
   const listenSavedForEpisode = useRef<number | null>(null);
   const lastSavedPositionTime = useRef(0);
   const positionRestored = useRef(false);
+  const lastTokenTapAt = useRef(0);
 
   // Audio
   const originalPlayer = useAudioPlayer(
@@ -213,6 +215,16 @@ export default function EpisodeDetailScreen() {
     getActivePlayer().seekTo(target).catch(() => {});
     if (episode && activePlayer === 'original') {
       setPlaybackPosition(episode.id, target).catch(() => {});
+    }
+  };
+
+  const handleSegmentPress = (segment: TranscriptSegment) => {
+    if (!hasSegmentTiming(segment)) return;
+    if (Date.now() - lastTokenTapAt.current < 250) return;
+    switchToOriginal();
+    originalPlayer.seekTo(segment.start).catch(() => {});
+    if (episode) {
+      setPlaybackPosition(episode.id, segment.start).catch(() => {});
     }
   };
 
@@ -438,7 +450,10 @@ export default function EpisodeDetailScreen() {
     bold: boolean;
     hasTrailingSpace: boolean;
   }) => {
-    const onPress = () => handleWordTap(text, context, isPhrase);
+    const onPress = () => {
+      lastTokenTapAt.current = Date.now();
+      handleWordTap(text, context, isPhrase);
+    };
     const displayText = hasTrailingSpace ? `${text} ` : text;
     if (Platform.OS === 'web') {
       return createElement('span', {
@@ -520,6 +535,15 @@ export default function EpisodeDetailScreen() {
   };
 
   const progress = duration > 0 ? currentTime / duration : 0;
+  const autoHighlightedLine = activePlayer === 'original' && episode.transcript_segments
+    ? episode.transcript_segments.findIndex((seg) => (
+        hasSegmentTiming(seg) &&
+        currentTime >= seg.start &&
+        currentTime < seg.end
+      ))
+    : -1;
+  const effectiveHighlightedLine = autoHighlightedLine >= 0 ? autoHighlightedLine : highlightedLine;
+  const hasAlignedTranscript = !!episode.transcript_segments?.some(hasSegmentTiming);
   const transcriptLineCount = episode.transcript_segments && episode.transcript_segments.length > 0
     ? episode.transcript_segments.length
     : (episode.transcript || '').split('\n').filter((line) => line.trim()).length;
@@ -720,23 +744,55 @@ export default function EpisodeDetailScreen() {
         {showTranscript && (
           <>
             <Text style={styles.hintText}>
-              Tap a word or highlighted phrase to save it. Use Focus to mark a line.
+              Tap words to save them. Timed paragraphs follow audio and can seek playback.
             </Text>
+            {hasAlignedTranscript ? (
+              <View style={styles.alignmentMetaRow}>
+                <Text style={styles.alignmentMetaText}>Aligned transcript</Text>
+              </View>
+            ) : null}
             {episode.transcript_segments && episode.transcript_segments.length > 0 ? (
               <View style={styles.transcriptContainer}>
-                {episode.transcript_segments.map((seg, i) => (
-                  <View
-                    key={i}
-                    style={[styles.transcriptLine, highlightedLine === i && styles.transcriptLineActive]}
-                  >
-                    <Text style={styles.transcriptText}>
-                      {seg.speaker && (
-                        <Text style={styles.transcriptSpeaker}>{seg.speaker}: </Text>
-                      )}
-                      {renderTextWithBold(seg.text, seg.text)}
-                    </Text>
-                  </View>
-                ))}
+                {episode.transcript_segments.map((seg, i) => {
+                  const timed = hasSegmentTiming(seg);
+                  const lineStyle = [
+                    styles.transcriptLine,
+                    timed && styles.transcriptLineTimed,
+                    effectiveHighlightedLine === i && styles.transcriptLineActive,
+                    autoHighlightedLine === i && styles.transcriptLineAuto,
+                  ];
+                  const content = (
+                    <View style={styles.transcriptLineContent}>
+                      <Text style={styles.transcriptText}>
+                        {seg.speaker && (
+                          <Text style={styles.transcriptSpeaker}>{seg.speaker}: </Text>
+                        )}
+                        {renderTextWithBold(seg.text, seg.text)}
+                      </Text>
+                      {timed ? (
+                        <Text style={styles.segmentTime}>{formatTime(seg.start)}</Text>
+                      ) : null}
+                    </View>
+                  );
+
+                  if (!timed) {
+                    return (
+                      <View key={i} style={lineStyle}>
+                        {content}
+                      </View>
+                    );
+                  }
+
+                  return (
+                    <Pressable
+                      key={i}
+                      onPress={() => handleSegmentPress(seg)}
+                      style={lineStyle}
+                    >
+                      {content}
+                    </Pressable>
+                  );
+                })}
               </View>
             ) : episode.transcript ? (
               <View style={styles.transcriptContainer}>
@@ -746,7 +802,7 @@ export default function EpisodeDetailScreen() {
                   return (
                     <View
                       key={i}
-                      style={[styles.transcriptLine, highlightedLine === i && styles.transcriptLineActive]}
+                      style={[styles.transcriptLine, effectiveHighlightedLine === i && styles.transcriptLineActive]}
                     >
                       <Text style={styles.transcriptText}>
                         {renderTextWithBold(trimmed, trimmed)}
@@ -822,6 +878,16 @@ export default function EpisodeDetailScreen() {
         </TouchableOpacity>
       </Modal>
     </ScrollView>
+  );
+}
+
+function hasSegmentTiming(segment: TranscriptSegment): segment is TranscriptSegment & { start: number; end: number } {
+  return (
+    typeof segment.start === 'number' &&
+    typeof segment.end === 'number' &&
+    Number.isFinite(segment.start) &&
+    Number.isFinite(segment.end) &&
+    segment.end > segment.start
   );
 }
 
@@ -1175,14 +1241,49 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
   },
+  transcriptLineTimed: {
+    cursor: Platform.OS === 'web' ? 'pointer' : undefined,
+  } as any,
   transcriptLineActive: {
     backgroundColor: colors.primaryLight + '18',
     borderBottomColor: colors.primaryLight,
   },
+  transcriptLineAuto: {
+    backgroundColor: colors.primaryLight + '28',
+    borderLeftWidth: 3,
+    borderLeftColor: colors.primary,
+  },
+  transcriptLineContent: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
   transcriptText: {
+    flex: 1,
     fontSize: fontSize.md,
     color: colors.text,
     lineHeight: 24,
+  },
+  segmentTime: {
+    minWidth: 42,
+    textAlign: 'right',
+    fontSize: fontSize.xs,
+    color: colors.textMuted,
+    lineHeight: 24,
+    fontVariant: ['tabular-nums'],
+  },
+  alignmentMetaRow: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.primaryLight + '18',
+    borderRadius: borderRadius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    marginBottom: spacing.sm,
+  },
+  alignmentMetaText: {
+    color: colors.primary,
+    fontSize: fontSize.xs,
+    fontWeight: '700',
   },
   transcriptSpeaker: {
     fontSize: fontSize.md,

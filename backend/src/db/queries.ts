@@ -12,7 +12,7 @@ export async function getEpisodes(
   const total = countResult?.total ?? 0;
 
   const { results } = await db.prepare(
-    `SELECT id, bbc_id, title, description, duration_sec, published_at,
+    `SELECT id, bbc_id, title, description, duration_sec, transcript_start_sec, transcript_end_sec, published_at,
             CASE WHEN transcript IS NOT NULL AND transcript != '' THEN 1 ELSE 0 END as has_transcript,
             fetch_status
      FROM episodes ORDER BY published_at DESC LIMIT ? OFFSET ?`
@@ -29,7 +29,10 @@ export async function getEpisodeByBbcId(db: D1Database, bbcId: string): Promise<
   return db.prepare('SELECT * FROM episodes WHERE bbc_id = ?').bind(bbcId).first<Episode>();
 }
 
-export async function insertEpisode(db: D1Database, ep: Omit<Episode, 'id' | 'created_at'>): Promise<void> {
+export async function insertEpisode(
+  db: D1Database,
+  ep: Omit<Episode, 'id' | 'created_at' | 'transcript_start_sec' | 'transcript_end_sec'>
+): Promise<void> {
   await db.prepare(
     `INSERT OR IGNORE INTO episodes (bbc_id, title, description, audio_url, audio_r2_key, page_url, duration_sec, published_at, transcript, transcript_segments, fetch_status)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -91,6 +94,40 @@ export async function updateEpisodeTranscriptById(
   await db.prepare(
     'UPDATE episodes SET transcript = ?, transcript_segments = ? WHERE id = ?'
   ).bind(transcript, segments, id).run();
+}
+
+export async function updateEpisodeAlignmentWindow(
+  db: D1Database,
+  id: number,
+  start: number | null,
+  end: number | null
+): Promise<void> {
+  await db.prepare(
+    'UPDATE episodes SET transcript_start_sec = ?, transcript_end_sec = ? WHERE id = ?'
+  ).bind(start, end, id).run();
+}
+
+export async function updateEpisodeAlignedSegments(
+  db: D1Database,
+  id: number,
+  segments: string
+): Promise<void> {
+  await db.prepare(
+    'UPDATE episodes SET transcript_segments = ? WHERE id = ?'
+  ).bind(segments, id).run();
+}
+
+export async function getEpisodesNeedingAlignment(db: D1Database, limit = 20): Promise<Episode[]> {
+  const safeLimit = Math.max(1, Math.min(50, limit));
+  const { results } = await db.prepare(
+    `SELECT * FROM episodes
+     WHERE transcript_segments IS NOT NULL
+       AND transcript_segments != ''
+       AND transcript_segments NOT LIKE '%"start"%'
+     ORDER BY published_at DESC
+     LIMIT ?`
+  ).bind(safeLimit).all<Episode>();
+  return results ?? [];
 }
 
 export async function getPendingEpisodes(db: D1Database, limit = 5): Promise<Episode[]> {

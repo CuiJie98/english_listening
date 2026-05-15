@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS episodes (
   audio_r2_key  TEXT,
   page_url      TEXT,
   duration_sec  INTEGER,
+  transcript_start_sec REAL,
+  transcript_end_sec REAL,
   published_at  INTEGER,
   transcript    TEXT,
   transcript_segments TEXT,

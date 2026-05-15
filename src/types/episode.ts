@@ -7,6 +7,8 @@ export interface Episode {
   audio_local: string | null;
   page_url: string | null;
   duration_sec: number | null;
+  transcript_start_sec: number | null;
+  transcript_end_sec: number | null;
   published_at: number | null;
   transcript: string | null;
   transcript_segments: TranscriptSegment[] | null;
@@ -17,6 +19,8 @@ export interface Episode {
 export interface TranscriptSegment {
   speaker: string;
   text: string;
+  start?: number | null;
+  end?: number | null;
 }
 
 export interface EpisodeSummary {
@@ -24,6 +28,8 @@ export interface EpisodeSummary {
   title: string;
   published_at: number | null;
   duration_sec: number | null;
+  transcript_start_sec: number | null;
+  transcript_end_sec: number | null;
   has_transcript: boolean;
   fetch_status: Episode['fetch_status'];
 }

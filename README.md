@@ -58,6 +58,9 @@ npx wrangler pages deploy dist --project-name bbc-english-app --commit-message "
 | `GET /api/reparse-all?secret=xxx` | 重新提取 transcript（每批 10 个），需多次调用直到返回 `remaining: 0` |
 | `GET /api/reparse/:id?secret=xxx` | 重新提取单个节目的 transcript |
 | `GET /api/clear-transcripts?secret=xxx` | 清除所有 transcript 数据，状态重置为 `pending`，等 cron 自动重新抓取 |
+| `POST /api/episodes/:id/alignment-window?secret=xxx` | 设置正文音频窗口，例如 `{ "start": 12, "end": 356 }` |
+| `POST /api/episodes/:id/align?secret=xxx` | 按正文窗口为单集 transcript 段落生成启发式时间戳 |
+| `POST /api/episodes/align-batch?secret=xxx` | 批量为已有 transcript 生成段落时间戳 |
 
 ### 调试
 

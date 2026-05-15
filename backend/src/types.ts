@@ -14,6 +14,8 @@ export interface Episode {
   audio_r2_key: string | null;
   page_url: string;
   duration_sec: number | null;
+  transcript_start_sec: number | null;
+  transcript_end_sec: number | null;
   published_at: number;
   transcript: string | null;
   transcript_segments: string | null;
@@ -27,6 +29,8 @@ export interface EpisodeSummary {
   title: string;
   description: string;
   duration_sec: number | null;
+  transcript_start_sec: number | null;
+  transcript_end_sec: number | null;
   published_at: number;
   has_transcript: boolean;
   fetch_status: string;
