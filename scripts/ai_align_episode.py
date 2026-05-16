@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_API_BASE = "https://bbc-english-api.1140390745.workers.dev"
 MIN_MATCH_SCORE = 0.32
+REQUEST_USER_AGENT = "Mozilla/5.0 (compatible; BBCEnglishAligner/1.0; +https://github.com/CuiJie98/english_listening)"
 
 
 @dataclass
@@ -54,8 +55,8 @@ def main() -> int:
     return 2
 
   api = ApiClient(args.api_base.rstrip("/"), args.admin_secret)
-  episode_ids = [args.episode_id] if args.episode_id else find_candidate_episode_ids(api, args.limit)
-  if not episode_ids:
+  episodes = [api.get_json(f"/api/episodes/{args.episode_id}")] if args.episode_id else find_candidate_episodes(api, args.limit)
+  if not episodes:
     print("No candidate episodes found.")
     return 0
 
@@ -67,9 +68,10 @@ def main() -> int:
   failures = 0
   with tempfile.TemporaryDirectory(prefix="bbc-align-") as tmp:
     workdir = Path(tmp)
-    for episode_id in episode_ids:
+    for episode in episodes:
+      episode_id = int(episode["id"])
       try:
-        process_episode(api, model, episode_id, workdir, args.force, args.dry_run)
+        process_episode(api, model, episode, workdir, args.force, args.dry_run)
       except Exception as exc:
         failures += 1
         print(f"ERR episode {episode_id}: {exc}", file=sys.stderr)
@@ -101,7 +103,10 @@ class ApiClient:
   def _request_json(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
     url = f"{self.base_url}{path}"
     data = None
-    headers = {"Accept": "application/json"}
+    headers = {
+      "Accept": "application/json",
+      "User-Agent": REQUEST_USER_AGENT,
+    }
     if payload is not None:
       data = json.dumps(payload).encode("utf-8")
       headers["Content-Type"] = "application/json"
@@ -117,17 +122,17 @@ class ApiClient:
     return json.loads(raw)
 
 
-def find_candidate_episode_ids(api: ApiClient, limit: int) -> list[int]:
+def find_candidate_episodes(api: ApiClient, limit: int) -> list[dict[str, Any]]:
   data = api.get_json(f"/api/episodes?page=1&limit={max(1, min(limit * 5, 50))}")
-  ids: list[int] = []
+  episodes: list[dict[str, Any]] = []
   for item in data.get("episodes", []):
     if item.get("has_transcript"):
       episode = api.get_json(f"/api/episodes/{item['id']}")
       if needs_alignment(episode):
-        ids.append(int(item["id"]))
-    if len(ids) >= limit:
+        episodes.append(episode)
+    if len(episodes) >= limit:
       break
-  return ids
+  return episodes
 
 
 def needs_alignment(episode: dict[str, Any]) -> bool:
@@ -137,8 +142,8 @@ def needs_alignment(episode: dict[str, Any]) -> bool:
   return not all(isinstance(seg.get("start"), (int, float)) and isinstance(seg.get("end"), (int, float)) for seg in segments)
 
 
-def process_episode(api: ApiClient, model: Any, episode_id: int, workdir: Path, force: bool, dry_run: bool) -> None:
-  episode = api.get_json(f"/api/episodes/{episode_id}")
+def process_episode(api: ApiClient, model: Any, episode: dict[str, Any], workdir: Path, force: bool, dry_run: bool) -> None:
+  episode_id = int(episode["id"])
   if not force and not needs_alignment(episode):
     print(f"SKIP episode {episode_id}: already aligned")
     return
@@ -170,7 +175,7 @@ def process_episode(api: ApiClient, model: Any, episode_id: int, workdir: Path, 
 
 
 def download_file(url: str, path: Path) -> None:
-  req = Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; BBCEnglishAligner/1.0)"})
+  req = Request(url, headers={"User-Agent": REQUEST_USER_AGENT})
   with urlopen(req, timeout=120) as resp:
     path.write_bytes(resp.read())
 
