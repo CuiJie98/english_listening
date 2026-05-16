@@ -33,6 +33,16 @@ import type { TranscriptSegment } from '../../src/types/episode';
 type Mode = 'listen' | 'record' | 'compare';
 type ActivePlayer = 'original' | 'recording';
 type EpisodeSection = 'transcript' | 'shadowing' | 'details';
+type PracticeMode = 'sentence' | 'full';
+type RecordingScope = 'sentence' | 'full';
+type SelfRating = 'again' | 'hard' | 'good' | 'easy';
+
+const SELF_RATINGS: Array<{ key: SelfRating; label: string; score: number }> = [
+  { key: 'again', label: 'Again', score: 45 },
+  { key: 'hard', label: 'Hard', score: 65 },
+  { key: 'good', label: 'Good', score: 82 },
+  { key: 'easy', label: 'Easy', score: 95 },
+];
 
 function tokenizeTranscriptText(text: string): { text: string; hasTrailingSpace: boolean }[] {
   return (text.match(/\s+|\S+\s*/g) || []).map((piece) => {
@@ -66,6 +76,15 @@ export default function EpisodeDetailScreen() {
   const [highlightedLine, setHighlightedLine] = useState<number | null>(null);
   const [isFavorite, setIsFavorite] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [practiceMode, setPracticeMode] = useState<PracticeMode>('sentence');
+  const [selectedSegmentIndex, setSelectedSegmentIndex] = useState<number | null>(null);
+  const [sentenceLoop, setSentenceLoop] = useState(false);
+  const [sentencePlaybackActive, setSentencePlaybackActive] = useState(false);
+  const [recordingScope, setRecordingScope] = useState<RecordingScope>('full');
+  const [recordingDurationMs, setRecordingDurationMs] = useState<number | null>(null);
+  const [selfRating, setSelfRating] = useState<SelfRating>('good');
+  const [lastPracticeScore, setLastPracticeScore] = useState<number | null>(null);
+  const [practicedSegments, setPracticedSegments] = useState<Set<number>>(() => new Set());
   const [recordStartTime, setRecordStartTime] = useState(0);
   const [recordingUri, setRecordingUri] = useState<string | null>(null);
   const [activePlayer, setActivePlayer] = useState<ActivePlayer>('original');
@@ -129,6 +148,21 @@ export default function EpisodeDetailScreen() {
   }, [episode]);
 
   useEffect(() => {
+    if (!episode?.transcript_segments) return;
+    const firstTimedIndex = episode.transcript_segments.findIndex(hasSegmentTiming);
+    setSelectedSegmentIndex((current) => {
+      if (current !== null && hasSegmentTiming(episode.transcript_segments?.[current])) {
+        return current;
+      }
+      return firstTimedIndex >= 0 ? firstTimedIndex : null;
+    });
+    setPracticeMode(firstTimedIndex >= 0 ? 'sentence' : 'full');
+    setPracticedSegments(new Set());
+    setLastPracticeScore(null);
+    setRecordingDurationMs(null);
+  }, [episode?.id]);
+
+  useEffect(() => {
     getPlaybackSpeed()
       .then((rate) => setPlaybackRate(rate))
       .catch(() => setPlaybackRate(1.0));
@@ -174,6 +208,20 @@ export default function EpisodeDetailScreen() {
     }).catch(() => {});
   }, [activePlayer, episode, originalStatus.didJustFinish, originalStatus.duration]);
 
+  useEffect(() => {
+    if (!episode || !sentencePlaybackActive || activePlayer !== 'original') return;
+    if (selectedSegmentIndex === null) return;
+    const segment = episode.transcript_segments?.[selectedSegmentIndex];
+    if (!hasSegmentTiming(segment)) return;
+    if (currentTime < segment.end) return;
+    if (sentenceLoop) {
+      originalPlayer.seekTo(segment.start).then(() => originalPlayer.play()).catch(() => {});
+    } else {
+      originalPlayer.pause();
+      setSentencePlaybackActive(false);
+    }
+  }, [activePlayer, currentTime, episode, originalPlayer, selectedSegmentIndex, sentenceLoop, sentencePlaybackActive]);
+
   const formatTime = (seconds: number) => {
     const totalSec = Math.floor(seconds);
     const min = Math.floor(totalSec / 60);
@@ -218,10 +266,15 @@ export default function EpisodeDetailScreen() {
     }
   };
 
-  const handleSegmentPress = (segment: TranscriptSegment) => {
+  const handleSegmentPress = (segment: TranscriptSegment, index: number) => {
     if (!hasSegmentTiming(segment)) return;
     if (Date.now() - lastTokenTapAt.current < 250) return;
+    setSelectedSegmentIndex(index);
+    setHighlightedLine(index);
+    setSaved(false);
+    setLastPracticeScore(null);
     switchToOriginal();
+    setSentencePlaybackActive(false);
     originalPlayer.seekTo(segment.start).catch(() => {});
     if (episode) {
       setPlaybackPosition(episode.id, segment.start).catch(() => {});
@@ -241,7 +294,7 @@ export default function EpisodeDetailScreen() {
     setActivePlayer('recording');
   };
 
-  const handleStartRecording = async () => {
+  const handleStartRecording = async (scope: RecordingScope = 'full') => {
     const { granted } = await requestRecordingPermissionsAsync();
     if (!granted) {
       Alert.alert('Permission', 'Microphone permission is required for recording.');
@@ -253,11 +306,14 @@ export default function EpisodeDetailScreen() {
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
       await recorder.prepareToRecordAsync();
       recorder.record();
+      setRecordingScope(scope);
       setActivePlayer('original');
       setMode('record');
       setActiveSection('shadowing');
       setSaved(false);
       setRecordingUri(null);
+      setRecordingDurationMs(null);
+      setLastPracticeScore(null);
       setRecordStartTime(Date.now());
     } catch (err: any) {
       Alert.alert('Error', err?.message || 'Failed to start recording');
@@ -269,6 +325,7 @@ export default function EpisodeDetailScreen() {
       await recorder.stop();
       await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
       setRecordingUri(recorder.uri);
+      setRecordingDurationMs(Date.now() - recordStartTime);
       setMode('compare');
       switchToOriginal();
     } catch (err: any) {
@@ -283,18 +340,43 @@ export default function EpisodeDetailScreen() {
   };
 
   const handlePlayOriginal = () => {
+    if (recordingScope === 'sentence' && selectedSegmentIndex !== null) {
+      handlePlaySentence();
+      return;
+    }
     switchToOriginal();
     originalPlayer.play();
   };
 
   const handleSaveAttempt = async () => {
     if (!episode) return;
+    const isSentencePractice = recordingScope === 'sentence';
+    const segment = isSentencePractice && selectedSegmentIndex !== null
+      ? episode.transcript_segments?.[selectedSegmentIndex]
+      : null;
+    const durationValue = recordingDurationMs ?? Date.now() - recordStartTime;
+    const targetDurationMs = hasSegmentTiming(segment)
+      ? Math.round((segment.end - segment.start) * 1000)
+      : undefined;
+    const score = isSentencePractice && targetDurationMs
+      ? calculatePracticeScore(durationValue, targetDurationMs, selfRating)
+      : undefined;
     try {
       await insertAttempt({
         episode_id: episode.id,
         type: 'shadow',
-        duration_ms: Date.now() - recordStartTime,
+        duration_ms: durationValue,
+        score,
+        segment_index: hasSegmentTiming(segment) ? selectedSegmentIndex ?? undefined : undefined,
+        segment_start_sec: hasSegmentTiming(segment) ? segment.start : undefined,
+        segment_end_sec: hasSegmentTiming(segment) ? segment.end : undefined,
+        segment_text: hasSegmentTiming(segment) ? stripTranscriptMarkup(segment.text) : undefined,
+        self_rating: isSentencePractice ? selfRating : undefined,
       });
+      if (isSentencePractice && selectedSegmentIndex !== null) {
+        setPracticedSegments((current) => new Set(current).add(selectedSegmentIndex));
+        setLastPracticeScore(score ?? null);
+      }
       setSaved(true);
     } catch (err: any) {
       Alert.alert('Error', err?.message || 'Failed to save attempt');
@@ -308,6 +390,35 @@ export default function EpisodeDetailScreen() {
     originalPlayer.seekTo(0).catch(() => {});
     setMode('listen');
     setSaved(false);
+    setRecordingDurationMs(null);
+    setLastPracticeScore(null);
+  };
+
+  const handlePlaySentence = () => {
+    if (!episode || selectedSegmentIndex === null) return;
+    const segment = episode.transcript_segments?.[selectedSegmentIndex];
+    if (!hasSegmentTiming(segment)) return;
+    recordingPlayer.pause();
+    originalPlayer.setPlaybackRate(playbackRate);
+    setActivePlayer('original');
+    setSentencePlaybackActive(true);
+    originalPlayer.seekTo(segment.start).then(() => originalPlayer.play()).catch(() => {});
+    setPlaybackPosition(episode.id, segment.start).catch(() => {});
+  };
+
+  const moveSelectedSentence = (direction: -1 | 1) => {
+    if (!episode?.transcript_segments) return;
+    const timedIndices = episode.transcript_segments
+      .map((segment, index) => hasSegmentTiming(segment) ? index : -1)
+      .filter((index) => index >= 0);
+    if (timedIndices.length === 0) return;
+    const currentPosition = Math.max(0, timedIndices.indexOf(selectedSegmentIndex ?? timedIndices[0]));
+    const nextPosition = Math.max(0, Math.min(timedIndices.length - 1, currentPosition + direction));
+    const nextIndex = timedIndices[nextPosition];
+    setSelectedSegmentIndex(nextIndex);
+    setHighlightedLine(nextIndex);
+    setSaved(false);
+    setLastPracticeScore(null);
   };
 
   const handleToggleFavorite = async () => {
@@ -542,11 +653,27 @@ export default function EpisodeDetailScreen() {
         currentTime < seg.end
       ))
     : -1;
-  const effectiveHighlightedLine = autoHighlightedLine >= 0 ? autoHighlightedLine : highlightedLine;
+  const effectiveHighlightedLine = selectedSegmentIndex ?? (autoHighlightedLine >= 0 ? autoHighlightedLine : highlightedLine);
   const hasAlignedTranscript = !!episode.transcript_segments?.some(hasSegmentTiming);
   const transcriptLineCount = episode.transcript_segments && episode.transcript_segments.length > 0
     ? episode.transcript_segments.length
     : (episode.transcript || '').split('\n').filter((line) => line.trim()).length;
+  const timedSegmentIndices = episode.transcript_segments
+    ? episode.transcript_segments
+      .map((segment, index) => hasSegmentTiming(segment) ? index : -1)
+      .filter((index) => index >= 0)
+    : [];
+  const canUseSentencePractice = timedSegmentIndices.length > 0;
+  const selectedSegment = selectedSegmentIndex !== null
+    ? episode.transcript_segments?.[selectedSegmentIndex]
+    : null;
+  const selectedSegmentPosition = selectedSegmentIndex !== null
+    ? timedSegmentIndices.indexOf(selectedSegmentIndex) + 1
+    : 0;
+  const selectedSentenceText = selectedSegment ? stripTranscriptMarkup(selectedSegment.text) : '';
+  const targetSentenceMs = hasSegmentTiming(selectedSegment)
+    ? Math.round((selectedSegment.end - selectedSegment.start) * 1000)
+    : 0;
 
   const handleCycleHighlightedLine = () => {
     if (transcriptLineCount === 0) return;
@@ -618,7 +745,7 @@ export default function EpisodeDetailScreen() {
       <View style={styles.sectionTabs}>
         {[
           { key: 'transcript', label: 'Transcript' },
-          { key: 'shadowing', label: 'Shadowing' },
+          { key: 'shadowing', label: 'Practice' },
           { key: 'details', label: 'Details' },
         ].map((tab) => (
           <TouchableOpacity
@@ -635,14 +762,90 @@ export default function EpisodeDetailScreen() {
 
       {activeSection === 'shadowing' && mode === 'listen' && (
         <View style={styles.section}>
-          <TouchableOpacity style={styles.recordStartButton} onPress={handleStartRecording}>
-            <Text style={styles.recordStartText}>Start Shadowing</Text>
-          </TouchableOpacity>
+          {canUseSentencePractice ? (
+            <View style={styles.practicePanel}>
+              <View style={styles.practiceModeRow}>
+                <TouchableOpacity
+                  style={[styles.practiceModeButton, practiceMode === 'sentence' && styles.practiceModeButtonActive]}
+                  onPress={() => setPracticeMode('sentence')}
+                >
+                  <Text style={[styles.practiceModeText, practiceMode === 'sentence' && styles.practiceModeTextActive]}>
+                    Sentence
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.practiceModeButton, practiceMode === 'full' && styles.practiceModeButtonActive]}
+                  onPress={() => setPracticeMode('full')}
+                >
+                  <Text style={[styles.practiceModeText, practiceMode === 'full' && styles.practiceModeTextActive]}>
+                    Full episode
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {practiceMode === 'sentence' && hasSegmentTiming(selectedSegment) ? (
+                <>
+                  <View style={styles.sentenceCard}>
+                    <View style={styles.sentenceMetaRow}>
+                      <Text style={styles.sentenceMetaText}>
+                        Sentence {selectedSegmentPosition}/{timedSegmentIndices.length}
+                      </Text>
+                      {selectedSegmentIndex !== null && practicedSegments.has(selectedSegmentIndex) ? (
+                        <Text style={styles.practicedBadge}>Practiced</Text>
+                      ) : null}
+                    </View>
+                    <Text style={styles.sentencePracticeText}>{selectedSentenceText}</Text>
+                    <Text style={styles.sentenceTimeText}>
+                      {formatTime(selectedSegment.start)} - {formatTime(selectedSegment.end)}
+                    </Text>
+                  </View>
+
+                  <View style={styles.sentenceControls}>
+                    <TouchableOpacity style={styles.sentenceToolButton} onPress={() => moveSelectedSentence(-1)}>
+                      <Text style={styles.sentenceToolText}>Prev</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.sentenceToolButton} onPress={handlePlaySentence}>
+                      <Text style={styles.sentenceToolText}>Play sentence</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.sentenceToolButton, sentenceLoop && styles.sentenceToolButtonActive]}
+                      onPress={() => setSentenceLoop((value) => !value)}
+                    >
+                      <Text style={[styles.sentenceToolText, sentenceLoop && styles.sentenceToolTextActive]}>
+                        Loop
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.sentenceToolButton} onPress={() => moveSelectedSentence(1)}>
+                      <Text style={styles.sentenceToolText}>Next</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <TouchableOpacity style={styles.recordStartButton} onPress={() => handleStartRecording('sentence')}>
+                    <Text style={styles.recordStartText}>Record this sentence</Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <TouchableOpacity style={styles.recordStartButton} onPress={() => handleStartRecording('full')}>
+                  <Text style={styles.recordStartText}>Start full shadowing</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          ) : (
+            <TouchableOpacity style={styles.recordStartButton} onPress={() => handleStartRecording('full')}>
+              <Text style={styles.recordStartText}>Start Shadowing</Text>
+            </TouchableOpacity>
+          )}
         </View>
       )}
 
       {activeSection === 'shadowing' && mode === 'record' && (
         <View style={styles.section}>
+          {recordingScope === 'sentence' && selectedSentenceText ? (
+            <View style={styles.sentenceCard}>
+              <Text style={styles.sentenceMetaText}>Recording sentence</Text>
+              <Text style={styles.sentencePracticeText}>{selectedSentenceText}</Text>
+            </View>
+          ) : null}
           {recorderState.isRecording ? (
             <Text style={styles.recordLabel}>
               Recording... {formatTime(recorderState.durationMillis / 1000)}
@@ -664,7 +867,17 @@ export default function EpisodeDetailScreen() {
 
       {activeSection === 'shadowing' && mode === 'compare' && (
         <View style={styles.section}>
-          <Text style={styles.compareLabel}>Compare your recording</Text>
+          <Text style={styles.compareLabel}>
+            {recordingScope === 'sentence' ? 'Compare this sentence' : 'Compare your recording'}
+          </Text>
+          {recordingScope === 'sentence' && selectedSentenceText ? (
+            <View style={styles.sentenceCard}>
+              <Text style={styles.sentenceMetaText}>
+                Target {targetSentenceMs ? formatTime(targetSentenceMs / 1000) : ''}
+              </Text>
+              <Text style={styles.sentencePracticeText}>{selectedSentenceText}</Text>
+            </View>
+          ) : null}
           <View style={styles.compareRow}>
             <TouchableOpacity
               style={[styles.compareButton, activePlayer === 'original' && styles.compareButtonActive]}
@@ -680,6 +893,36 @@ export default function EpisodeDetailScreen() {
               <Text style={styles.compareButtonText}>Mine</Text>
             </TouchableOpacity>
           </View>
+          {recordingScope === 'sentence' ? (
+            <>
+              <Text style={styles.ratingLabel}>How did it feel?</Text>
+              <View style={styles.ratingRow}>
+                {SELF_RATINGS.map((rating) => (
+                  <TouchableOpacity
+                    key={rating.key}
+                    style={[styles.ratingChip, selfRating === rating.key && styles.ratingChipActive]}
+                    onPress={() => setSelfRating(rating.key)}
+                  >
+                    <Text style={[styles.ratingChipText, selfRating === rating.key && styles.ratingChipTextActive]}>
+                      {rating.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {recordingDurationMs && targetSentenceMs ? (
+                <View style={styles.scorePreview}>
+                  <Text style={styles.scorePreviewText}>
+                    Timing score {calculatePracticeScore(recordingDurationMs, targetSentenceMs, selfRating)}
+                  </Text>
+                </View>
+              ) : null}
+            </>
+          ) : null}
+          {lastPracticeScore !== null ? (
+            <View style={styles.scorePreview}>
+              <Text style={styles.scorePreviewText}>Practice score {lastPracticeScore}</Text>
+            </View>
+          ) : null}
           <View style={styles.actionRow}>
             <TouchableOpacity
               style={[styles.saveButton, saved && styles.saveButtonSaved]}
@@ -760,6 +1003,7 @@ export default function EpisodeDetailScreen() {
                     timed && styles.transcriptLineTimed,
                     effectiveHighlightedLine === i && styles.transcriptLineActive,
                     autoHighlightedLine === i && styles.transcriptLineAuto,
+                    selectedSegmentIndex === i && styles.transcriptLineSelected,
                   ];
                   const content = (
                     <View style={styles.transcriptLineContent}>
@@ -786,7 +1030,7 @@ export default function EpisodeDetailScreen() {
                   return (
                     <Pressable
                       key={i}
-                      onPress={() => handleSegmentPress(seg)}
+                      onPress={() => handleSegmentPress(seg, i)}
                       style={lineStyle}
                     >
                       {content}
@@ -881,14 +1125,23 @@ export default function EpisodeDetailScreen() {
   );
 }
 
-function hasSegmentTiming(segment: TranscriptSegment): segment is TranscriptSegment & { start: number; end: number } {
+function hasSegmentTiming(segment: TranscriptSegment | null | undefined): segment is TranscriptSegment & { start: number; end: number } {
   return (
+    !!segment &&
     typeof segment.start === 'number' &&
     typeof segment.end === 'number' &&
     Number.isFinite(segment.start) &&
     Number.isFinite(segment.end) &&
     segment.end > segment.start
   );
+}
+
+function calculatePracticeScore(recordingMs: number, targetMs: number, rating: SelfRating): number {
+  if (recordingMs <= 0 || targetMs <= 0) return 0;
+  const ratio = Math.min(recordingMs, targetMs) / Math.max(recordingMs, targetMs);
+  const timingScore = Math.round(ratio * 100);
+  const ratingScore = SELF_RATINGS.find((item) => item.key === rating)?.score ?? 75;
+  return Math.max(0, Math.min(100, Math.round(timingScore * 0.65 + ratingScore * 0.35)));
 }
 
 const styles = StyleSheet.create({
@@ -1087,6 +1340,90 @@ const styles = StyleSheet.create({
     fontSize: fontSize.md,
     fontWeight: '600',
   },
+  practicePanel: {
+    gap: spacing.md,
+  },
+  practiceModeRow: {
+    flexDirection: 'row',
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: borderRadius.md,
+    padding: 4,
+  },
+  practiceModeButton: {
+    flex: 1,
+    alignItems: 'center',
+    borderRadius: borderRadius.sm,
+    paddingVertical: spacing.sm,
+  },
+  practiceModeButtonActive: {
+    backgroundColor: colors.surface,
+  },
+  practiceModeText: {
+    color: colors.textSecondary,
+    fontSize: fontSize.sm,
+    fontWeight: '600',
+  },
+  practiceModeTextActive: {
+    color: colors.text,
+  },
+  sentenceCard: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    gap: spacing.xs,
+  },
+  sentenceMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  sentenceMetaText: {
+    color: colors.textMuted,
+    fontSize: fontSize.xs,
+    fontWeight: '700',
+  },
+  practicedBadge: {
+    color: colors.success,
+    fontSize: fontSize.xs,
+    fontWeight: '700',
+  },
+  sentencePracticeText: {
+    color: colors.text,
+    fontSize: fontSize.md,
+    lineHeight: 24,
+  },
+  sentenceTimeText: {
+    color: colors.textMuted,
+    fontSize: fontSize.xs,
+  },
+  sentenceControls: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  sentenceToolButton: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+  },
+  sentenceToolButtonActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  sentenceToolText: {
+    color: colors.textSecondary,
+    fontSize: fontSize.sm,
+    fontWeight: '600',
+  },
+  sentenceToolTextActive: {
+    color: colors.surface,
+  },
   recordLabel: {
     fontSize: fontSize.sm,
     color: colors.textSecondary,
@@ -1148,6 +1485,53 @@ const styles = StyleSheet.create({
     fontSize: fontSize.sm,
     fontWeight: '500',
     color: colors.text,
+  },
+  ratingLabel: {
+    color: colors.textSecondary,
+    fontSize: fontSize.sm,
+    fontWeight: '600',
+    marginBottom: spacing.sm,
+  },
+  ratingRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  ratingChip: {
+    flexGrow: 1,
+    alignItems: 'center',
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+  },
+  ratingChipActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryLight + '20',
+  },
+  ratingChipText: {
+    color: colors.textSecondary,
+    fontSize: fontSize.sm,
+    fontWeight: '600',
+  },
+  ratingChipTextActive: {
+    color: colors.primary,
+  },
+  scorePreview: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.success + '18',
+    borderRadius: borderRadius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    marginBottom: spacing.md,
+  },
+  scorePreviewText: {
+    color: colors.success,
+    fontSize: fontSize.xs,
+    fontWeight: '700',
   },
   actionRow: {
     flexDirection: 'row',
@@ -1252,6 +1636,10 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primaryLight + '28',
     borderLeftWidth: 3,
     borderLeftColor: colors.primary,
+  },
+  transcriptLineSelected: {
+    borderLeftWidth: 3,
+    borderLeftColor: colors.secondary,
   },
   transcriptLineContent: {
     flexDirection: 'row',

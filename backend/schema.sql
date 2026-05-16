@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS attempts (
   user_answer TEXT,
   score      REAL,
   duration_ms INTEGER,
+  segment_index INTEGER,
+  segment_start_sec REAL,
+  segment_end_sec REAL,
+  segment_text TEXT,
+  self_rating TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 

@@ -268,11 +268,36 @@ export async function upsertReviewState(
 
 export async function insertAttempt(
   db: D1Database,
-  attempt: { user_id: string; episode_id: number; type: 'listen' | 'shadow'; duration_ms?: number }
+  attempt: {
+    user_id: string;
+    episode_id: number;
+    type: 'listen' | 'shadow';
+    duration_ms?: number;
+    score?: number;
+    segment_index?: number;
+    segment_start_sec?: number;
+    segment_end_sec?: number;
+    segment_text?: string;
+    self_rating?: 'again' | 'hard' | 'good' | 'easy';
+  }
 ): Promise<number> {
   const result = await db.prepare(
-    `INSERT INTO attempts (user_id, episode_id, type, duration_ms) VALUES (?, ?, ?, ?)`
-  ).bind(attempt.user_id, attempt.episode_id, attempt.type, attempt.duration_ms ?? null).run();
+    `INSERT INTO attempts (
+      user_id, episode_id, type, duration_ms, score,
+      segment_index, segment_start_sec, segment_end_sec, segment_text, self_rating
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    attempt.user_id,
+    attempt.episode_id,
+    attempt.type,
+    attempt.duration_ms ?? null,
+    attempt.score ?? null,
+    attempt.segment_index ?? null,
+    attempt.segment_start_sec ?? null,
+    attempt.segment_end_sec ?? null,
+    attempt.segment_text ?? null,
+    attempt.self_rating ?? null
+  ).run();
   return result.meta.last_row_id as number;
 }
 

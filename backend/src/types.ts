@@ -72,6 +72,11 @@ export interface Attempt {
   user_answer: string | null;
   score: number | null;
   duration_ms: number | null;
+  segment_index: number | null;
+  segment_start_sec: number | null;
+  segment_end_sec: number | null;
+  segment_text: string | null;
+  self_rating: 'again' | 'hard' | 'good' | 'easy' | null;
   created_at: number;
 }
 

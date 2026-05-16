@@ -113,6 +113,12 @@ export async function insertAttempt(attempt: {
   episode_id: number;
   type: 'listen' | 'shadow';
   duration_ms?: number;
+  score?: number;
+  segment_index?: number;
+  segment_start_sec?: number;
+  segment_end_sec?: number;
+  segment_text?: string;
+  self_rating?: 'again' | 'hard' | 'good' | 'easy';
 }): Promise<number> {
   const data = await apiFetch<{ id: number }>('/api/attempts', {
     method: 'POST',
@@ -128,6 +134,12 @@ export interface AttemptWithEpisode {
   episode_title: string | null;
   type: 'listen' | 'shadow';
   duration_ms: number | null;
+  score: number | null;
+  segment_index: number | null;
+  segment_start_sec: number | null;
+  segment_end_sec: number | null;
+  segment_text: string | null;
+  self_rating: 'again' | 'hard' | 'good' | 'easy' | null;
   created_at: number;
 }
 
