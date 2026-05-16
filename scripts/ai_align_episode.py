@@ -194,10 +194,14 @@ def transcribe_words(model: Any, audio_path: Path) -> list[WordTiming]:
       clean = word.word.strip()
       if not clean or not normalize_tokens(clean):
         continue
+      start = round(float(word.start), 2)
+      end = round(float(word.end), 2)
+      if end <= start:
+        end = round(start + 0.01, 2)
       words.append(WordTiming(
         word=clean,
-        start=round(float(word.start), 2),
-        end=round(float(word.end), 2),
+        start=start,
+        end=end,
         probability=round(float(word.probability), 3) if word.probability is not None else None,
       ))
   return words
