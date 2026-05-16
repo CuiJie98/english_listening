@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import tempfile
+import traceback
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -72,6 +73,7 @@ def main() -> int:
       except Exception as exc:
         failures += 1
         print(f"ERR episode {episode_id}: {exc}", file=sys.stderr)
+        traceback.print_exc()
 
   return 1 if failures else 0
 
